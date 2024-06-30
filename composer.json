@@ -1,0 +1,41 @@
+{
+    "name": "suvera/winter-doctrine",
+    "description": "Doctrine ORM/DBAL Support in the Winterboot framework",
+    "type": "library",
+    "keywords": [
+        "php8 framework",
+        "winter-boot",
+        "winterboot"
+    ],
+    "homepage": "https://suvera.github.io/",
+    "config": {
+        "platform": {
+            "php": "8.0"
+        }
+    },
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "dev\\winterframework\\doctrine\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "suvera"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/suvera/winter-doctrine/issues"
+    },
+    "minimum-stability": "dev",
+    "require": {
+        "doctrine/orm": "*"
+    },
+    "suggest": {
+        "ext-pdo_sqlite": "For using SQLite with Doctrine ORM",
+        "ext-pdo_mysql": "For using MySQL with Doctrine ORM",
+        "ext-pdo_pgsql": "For using PostgreSQL with Doctrine ORM",
+        "ext-pdo_sqlsrv": "For using SQL Server with Doctrine ORM",
+        "ext-pdo_oci": "For using Oracle with Doctrine ORM"
+    }
+}
