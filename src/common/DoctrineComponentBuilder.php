@@ -104,10 +104,12 @@ class DoctrineComponentBuilder {
             }
             $ds->setName($ds->getName() . self::DOCTRINE_SUFFIX);
 
-            try {
-                $parsedParams = $this->parseDsn($ds->getUrl());
-            } catch (MalformedDsnException $e) {
-                throw new WinterException('Malformed parameter "url".', 0, $e);
+            $parsedParams = $this->parseDsn($ds->getUrl());
+            $ds->parseDoctrineParams($dataSource);
+            foreach ($ds->getDoctrineOptions() as $key => $value) {
+                if (!is_null($value) && $value !== '' && (is_array($value) && count($value) > 0)) {
+                    $parsedParams[$key] = $value;
+                }
             }
 
             if (!isset($parsedParams['driver']) || !$parsedParams['driver']) {

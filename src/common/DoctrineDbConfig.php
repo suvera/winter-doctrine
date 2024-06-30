@@ -6,6 +6,7 @@ namespace dev\winterframework\doctrine\common;
 
 use dev\winterframework\pdbc\datasource\DataSourceConfig;
 use dev\winterframework\stereotype\JsonProperty;
+use dev\winterframework\type\Arrays;
 
 class DoctrineDbConfig extends DataSourceConfig {
     #[JsonProperty("doctrine.entityPaths")]
@@ -13,6 +14,8 @@ class DoctrineDbConfig extends DataSourceConfig {
 
     #[JsonProperty("doctrine.isDevMode")]
     private bool $isDevMode = false;
+
+    private array $doctrineOptions = [];
 
     private string $name;
 
@@ -63,11 +66,33 @@ class DoctrineDbConfig extends DataSourceConfig {
         $this->isDevMode = $isDevMode;
     }
 
-    public function getDoctrine(): array {
-        return $this->doctrine;
+    public function getDoctrineOptions(): array {
+        return $this->doctrineOptions;
     }
 
-    public function setDoctrine(array $doctrine): void {
-        $this->doctrine = $doctrine;
+    public function setDoctrineOptions(array $doctrineOptions): void {
+        $this->doctrineOptions = $doctrineOptions;
+    }
+
+    public function parseDoctrineParams(array $dataSource) {
+        $data = $this->unFlatten($dataSource);
+        if (isset($data['doctrine']) && is_array($data['doctrine'])) {
+            unset($data['doctrine']['isDevMode'], $data['doctrine']['entityPaths']);
+            $this->doctrineOptions = $data['doctrine'];
+        }
+    }
+
+    public function unFlatten(array $data): array {
+        $output = [];
+        foreach ($data as $key => $value) {
+            $parts = explode('.', $key);
+            $nested = &$output;
+            while (count($parts) > 1) {
+                $nested = &$nested[array_shift($parts)];
+                if (!is_array($nested)) $nested = [];
+            }
+            $nested[array_shift($parts)] = $value;
+        }
+        return $output;
     }
 }
