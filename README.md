@@ -54,10 +54,6 @@ Service/Client beans can be Autowired.
 
 ```phpt
 
-#[Autowired('consulBean01')]
-protected DiscoveryClient $discoveryClient;
+// TODO
 
-
-#[Autowired('netflixBean01')]
-protected EurekaClient $eurekaClient;
 ```
