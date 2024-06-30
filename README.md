@@ -26,7 +26,8 @@ modules:
 ## application.yml
 
 in your **application.yml** file you might already have setup datasources like this.
-There are two datasources docnfigured here with names
+
+In below example, there are two datasources configured here with names.
 
 1. defaultdb  (**isPrimary: true**)
 2. admindb
@@ -139,5 +140,31 @@ private DbalTransactionManager $defaultTxnManager;
 // DBAL Tranaction Manager
 #[Autowired("admindb-doctrine-dbaltxn")]
 private DbalTransactionManager $adminTxnManager;
+
+```
+
+
+## How to use Transcations - as AOP
+
+Articles About winter-boot framework.
+
+1. [Transaction Management](https://github.com/suvera/winter-boot/blob/master/docs/transactions.md)
+2. [Aspect Oriented Magic](https://github.com/suvera/winter-boot/blob/master/docs/custom_aop.md)
+
+Executing something under ORM/DBAL transaction is pretty easy by just using **Transactional** annotation
+
+```phpt
+
+#[Autowired("admindb-doctrine-em")]
+private EntityManager $adminEm;
+
+#[Transactional(transactionManager: "admindb-doctrine-emtxn")]
+public function executeInTransaction(): void {
+    // do something here
+    foreach ($objects as $obj) {
+        $this->adminEm->persist($obj);
+    }
+    // do more things here
+}
 
 ```
