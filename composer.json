@@ -10,7 +10,7 @@
     "homepage": "https://suvera.github.io/",
     "config": {
         "platform": {
-            "php": "8.0"
+            "php": "8.2"
         }
     },
     "license": "MIT",
@@ -29,7 +29,8 @@
     },
     "minimum-stability": "dev",
     "require": {
-        "doctrine/orm": "*"
+        "doctrine/orm": "*",
+        "symfony/cache": "7.2.x-dev"
     },
     "suggest": {
         "ext-pdo_sqlite": "For using SQLite with Doctrine ORM",

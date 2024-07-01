@@ -17,7 +17,8 @@
 *.iml
 *.ipr
 
-config/config.php
+
+/testapp/
 test.log
 test.php
 testApp/

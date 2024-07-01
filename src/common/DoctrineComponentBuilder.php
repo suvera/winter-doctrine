@@ -13,14 +13,13 @@ use dev\winterframework\txn\PlatformTransactionManager;
 use dev\winterframework\type\TypeAssert;
 use dev\winterframework\util\log\Wlf4p;
 use Doctrine\DBAL\DriverManager;
-use Doctrine\DBAL\Exception\MalformedDsnException;
 use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\ORMSetup;
-use dev\winterframework\doctrine\common\DoctrineDbConfig;
 use dev\winterframework\doctrine\dbal\DbalTransactionManager;
 use dev\winterframework\doctrine\orm\EmTransactionManager;
 use Doctrine\DBAL\Connection;
 use ReflectionClass;
+use Symfony\Component\Cache\Adapter\ArrayAdapter;
 use Throwable;
 use WeakMap;
 
@@ -28,7 +27,7 @@ class DoctrineComponentBuilder {
     use Wlf4p;
 
     const DOCTRINE_SUFFIX = '-doctrine';
-    const DOCTRINE_CONN_SUFFIX = '-conn';
+    const DOCTRINE_CONN_SUFFIX = '-dbal';
     const DOCTRINE_EM_SUFFIX = '-em';
     const DOCTRINE_TXN_SUFFIX = '-emtxn';
     const DOCTRINE_DBAL_TXN_SUFFIX = '-dbaltxn';
@@ -72,6 +71,7 @@ class DoctrineComponentBuilder {
         array $dataSources
     ) {
         $this->dsObjectMap = new WeakMap();
+        $this->dsConnectMap = new WeakMap();
         $this->init($dataSources);
     }
 
@@ -161,6 +161,7 @@ class DoctrineComponentBuilder {
         $config['driver'] = $parts[0];
 
         if ($config['driver'] === 'sqlite') {
+            $config['driver'] = 'sqlite3';
             $config['path'] = $parts[1];
             return $config;
         }
@@ -303,7 +304,7 @@ class DoctrineComponentBuilder {
             return $this->dsObjectMap[$ds];
         }
 
-        $config = ORMSetup::createAttributeMetadataConfiguration($ds->getEntityPaths(), $ds->isDevMode());
+        $config = ORMSetup::createAttributeMetadataConfiguration($ds->getEntityPaths(), $ds->isDevMode(), null, new ArrayAdapter(), false);
         $obj = new EntityManager($this->buildConnection($ds), $config);
 
         $this->dsObjectMap[$ds] = $obj;
@@ -317,7 +318,7 @@ class DoctrineComponentBuilder {
         }
 
         $dbParams = $this->dsParams[$ds->getName()];
-        $config = ORMSetup::createAttributeMetadataConfiguration($ds->getEntityPaths(), $ds->isDevMode());
+        $config = ORMSetup::createAttributeMetadataConfiguration($ds->getEntityPaths(), $ds->isDevMode(), null, new ArrayAdapter(), false);
 
         $connection = DriverManager::getConnection($dbParams, $config);
         $this->dsConnectMap[$ds] = $connection;
