@@ -15,6 +15,22 @@ class DoctrineDbConfig extends DataSourceConfig {
     #[JsonProperty("doctrine.isDevMode")]
     protected bool $isDevMode = false;
 
+    /**
+     * When true, this datasource acts as a multi-tenant template.
+     * Instead of building a single Connection/EntityManager, the builder
+     * creates TenantAwareConnection / TenantAwareEntityManager wrappers
+     * that resolve the actual per-tenant database at runtime.
+     */
+    #[JsonProperty("doctrine.tenantTemplate")]
+    protected bool $tenantTemplate = false;
+
+    /**
+     * Fully-qualified class name of a {@link TenantConnectionProvider}
+     * implementation. Required when tenantTemplate is true.
+     */
+    #[JsonProperty("doctrine.tenantConnectionProvider")]
+    protected string $tenantConnectionProvider = '';
+
     protected array $doctrineOptions = [];
 
 
@@ -34,6 +50,22 @@ class DoctrineDbConfig extends DataSourceConfig {
         $this->isDevMode = $isDevMode;
     }
 
+    public function isTenantTemplate(): bool {
+        return $this->tenantTemplate;
+    }
+
+    public function setTenantTemplate(bool $tenantTemplate): void {
+        $this->tenantTemplate = $tenantTemplate;
+    }
+
+    public function getTenantConnectionProvider(): string {
+        return $this->tenantConnectionProvider;
+    }
+
+    public function setTenantConnectionProvider(string $tenantConnectionProvider): void {
+        $this->tenantConnectionProvider = $tenantConnectionProvider;
+    }
+
     public function getDoctrineOptions(): array {
         return $this->doctrineOptions;
     }
@@ -45,7 +77,12 @@ class DoctrineDbConfig extends DataSourceConfig {
     public function parseDoctrineParams(array $dataSource) {
         $data = $this->unFlatten($dataSource);
         if (isset($data['doctrine']) && is_array($data['doctrine'])) {
-            unset($data['doctrine']['isDevMode'], $data['doctrine']['entityPaths']);
+            unset(
+                $data['doctrine']['isDevMode'],
+                $data['doctrine']['entityPaths'],
+                $data['doctrine']['tenantTemplate'],
+                $data['doctrine']['tenantConnectionProvider']
+            );
             $this->doctrineOptions = $data['doctrine'];
         }
     }

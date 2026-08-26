@@ -8,6 +8,7 @@ use dev\winterframework\txn\ex\NestedTransactionNotSupportedException;
 use dev\winterframework\txn\ex\TransactionUsageException;
 use dev\winterframework\txn\Savepoint;
 use dev\winterframework\txn\TransactionStatus;
+use Override;
 
 class DbalTransactionStatus implements TransactionStatus {
     protected bool $completed = false;
@@ -21,50 +22,62 @@ class DbalTransactionStatus implements TransactionStatus {
     ) {
     }
 
+    #[Override]
     public function isNewTransaction(): bool {
         return $this->newTransaction;
     }
 
+    #[Override]
     public function isReadOnly(): bool {
         return $this->readOnly;
     }
 
+    #[Override]
     public function isDebug(): bool {
         return $this->debug;
     }
 
+    #[Override]
     public function getTransaction(): ?DbalTransactionObject {
         return $this->transaction;
     }
 
+    #[Override]
     public function hasTransaction(): bool {
         return isset($this->transaction);
     }
 
+    #[Override]
     public function isCompleted(): bool {
         return $this->completed;
     }
 
+    #[Override]
     public function setCompleted(bool $completed): void {
         $this->completed = $completed;
     }
 
+    #[Override]
     public function getSavepoint(): Savepoint {
         return $this->savepoint;
     }
 
+    #[Override]
     public function flush(): void {
         $this->transaction->flush();
     }
 
+    #[Override]
     public function isRollbackOnly(): bool {
         return $this->transaction->isRollbackOnly();
     }
 
+    #[Override]
     public function hasSavepoint(): bool {
         return isset($this->savepoint);
     }
 
+    #[Override]
     public function createAndHoldSavepoint(): void {
         if (!$this->getTransaction()->isSavepointAllowed()) {
             throw new NestedTransactionNotSupportedException(
@@ -81,6 +94,7 @@ class DbalTransactionStatus implements TransactionStatus {
         $this->savepoint = $this->getTransaction()->createSavepoint();
     }
 
+    #[Override]
     public function rollbackToHeldSavepoint(): void {
         if (isset($this->savepoint)) {
             $this->getTransaction()->rollbackToSavepoint($this->savepoint);
@@ -92,6 +106,7 @@ class DbalTransactionStatus implements TransactionStatus {
         );
     }
 
+    #[Override]
     public function releaseHeldSavepoint(): void {
         if (isset($this->savepoint)) {
             $this->getTransaction()->releaseSavepoint($this->savepoint);

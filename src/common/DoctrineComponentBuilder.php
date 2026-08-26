@@ -6,6 +6,8 @@ namespace dev\winterframework\doctrine\common;
 
 use dev\winterframework\core\context\ApplicationContext;
 use dev\winterframework\core\context\ApplicationContextData;
+use dev\winterframework\doctrine\multitenancy\TenantConnectionProvider;
+use dev\winterframework\doctrine\multitenancy\TenantDoctrineProvider;
 use dev\winterframework\exception\WinterException;
 use dev\winterframework\io\timer\IdleCheckRegistry;
 use dev\winterframework\reflection\ObjectCreator;
@@ -31,6 +33,8 @@ class DoctrineComponentBuilder {
     const DOCTRINE_EM_SUFFIX = '-em';
     const DOCTRINE_TXN_SUFFIX = '-emtxn';
     const DOCTRINE_DBAL_TXN_SUFFIX = '-dbaltxn';
+
+    const DOCTRINE_TENANT_SUFFIX = '-tenant';
 
     /**
      * @var EntityManager[]
@@ -61,6 +65,16 @@ class DoctrineComponentBuilder {
      */
     private array $dsConfig = [];
     private array $dsParams = [];
+
+    /**
+     * @var array<string, TenantConnectionProvider> cached provider instances per datasource name
+     */
+    private array $tenantProviders = [];
+
+    /**
+     * @var array<string, TenantDoctrineProvider> cached tenant providers per datasource name
+     */
+    private array $tenantDoctrineProviders = [];
 
     private WeakMap $dsObjectMap;
     private WeakMap $dsConnectMap;
@@ -299,12 +313,66 @@ class DoctrineComponentBuilder {
         return $this->dsConfig;
     }
 
+    // ──────────────────────────────────────────────
+    // Tenant-aware bean factory
+    // ──────────────────────────────────────────────
+
+    /**
+     * Get the TenantDoctrineProvider for a tenant-template datasource.
+     *
+     * This is the single autowirable bean for multi-tenant setups.
+     * All methods accept an explicit $tenantId parameter.
+     */
+    public function getTenantDoctrineProvider(string $name): TenantDoctrineProvider {
+        $name = $this->stripTenantSuffix($name);
+
+        if (isset($this->tenantDoctrineProviders[$name])) {
+            return $this->tenantDoctrineProviders[$name];
+        }
+
+        if (!isset($this->dsConfig[$name])) {
+            throw new WinterException('Could not find TenantDoctrineProvider with name "' . $name . '"');
+        }
+
+        $ds = $this->dsConfig[$name];
+        if (!$ds->isTenantTemplate()) {
+            throw new WinterException(
+                'Datasource "' . $name . '" is not a tenant template. '
+                . 'Use the regular bean names instead.'
+            );
+        }
+
+        return $this->tenantDoctrineProviders[$name] = new TenantDoctrineProvider(
+            $this->dsParams[$name],
+            $this->getTenantProvider($ds),
+            $ds->getEntityPaths(),
+            $ds->isDevMode()
+        );
+    }
+
+    /**
+     * Strip the tenant suffix from a bean name to get the base datasource name.
+     */
+    private function stripTenantSuffix(string $name): string {
+        if (str_ends_with($name, self::DOCTRINE_TENANT_SUFFIX)) {
+            return substr($name, 0, -strlen(self::DOCTRINE_TENANT_SUFFIX));
+        }
+        return $name;
+    }
+
     private function buildEntityManager(DoctrineDbConfig $ds): EntityManager {
         if (isset($this->dsObjectMap[$ds])) {
             return $this->dsObjectMap[$ds];
         }
 
-        $config = ORMSetup::createAttributeMetadataConfiguration($ds->getEntityPaths(), $ds->isDevMode(), null, new ArrayAdapter(), false);
+        $config = ORMSetup::createAttributeMetadataConfiguration(
+            $ds->getEntityPaths(),
+            $ds->isDevMode(),
+            null,
+            new ArrayAdapter(),
+            false
+        );
+
         $obj = new EntityManager($this->buildConnection($ds), $config);
 
         $this->dsObjectMap[$ds] = $obj;
@@ -318,7 +386,13 @@ class DoctrineComponentBuilder {
         }
 
         $dbParams = $this->dsParams[$ds->getName()];
-        $config = ORMSetup::createAttributeMetadataConfiguration($ds->getEntityPaths(), $ds->isDevMode(), null, new ArrayAdapter(), false);
+        $config = ORMSetup::createAttributeMetadataConfiguration(
+            $ds->getEntityPaths(),
+            $ds->isDevMode(),
+            null,
+            new ArrayAdapter(),
+            false
+        );
 
         $connection = DriverManager::getConnection($dbParams, $config);
         $this->dsConnectMap[$ds] = $connection;
@@ -330,5 +404,43 @@ class DoctrineComponentBuilder {
         });
 
         return $connection;
+    }
+
+    /**
+     * Resolve and cache the TenantConnectionProvider for a tenant-template datasource.
+     */
+    private function getTenantProvider(DoctrineDbConfig $ds): TenantConnectionProvider {
+        $name = $ds->getName();
+
+        if (!isset($this->tenantProviders[$name])) {
+            $providerClass = $ds->getTenantConnectionProvider();
+
+            if ($providerClass === '') {
+                throw new WinterException(
+                    'Datasource "' . $name . '" has tenantTemplate=true but no '
+                    . 'tenantConnectionProvider class configured.'
+                );
+            }
+
+            if (!class_exists($providerClass)) {
+                throw new WinterException(
+                    'TenantConnectionProvider class "' . $providerClass . '" not found '
+                    . 'for datasource "' . $name . '".'
+                );
+            }
+
+            $provider = new $providerClass();
+
+            if (!($provider instanceof TenantConnectionProvider)) {
+                throw new WinterException(
+                    'Class "' . $providerClass . '" must implement '
+                    . TenantConnectionProvider::class . '.'
+                );
+            }
+
+            $this->tenantProviders[$name] = $provider;
+        }
+
+        return $this->tenantProviders[$name];
     }
 }

@@ -168,3 +168,145 @@ public function executeInTransaction(): void {
 }
 
 ```
+
+---
+
+## Multi-Tenancy Support
+
+When you need **separate database per tenant**, configure a datasource as a tenant template. At runtime, you pass the tenant identifier explicitly to a single autowired `TenantDoctrineProvider`, which resolves and caches per-tenant connections.
+
+### Architecture
+
+```
+Your code knows which tenant it's operating on (from request/auth/etc.)
+              ↓
+$this->doctrine->getEntityManager('tenant-123')
+              ↓
+TenantDoctrineProvider checks its pool: has 'tenant-123'?
+   ├─ Yes → returns cached EntityManager
+   └─ No  → calls TenantConnectionProvider::resolveParams('tenant-123', $baseParams)
+              ↓
+Provider queries admin DB → returns tenant-specific dbname/host/credentials
+              ↓
+Creates Connection + EntityManager for that tenant, caches them
+              ↓
+Returns the tenant-specific EntityManager
+```
+
+### Configuration
+
+Add `doctrine.tenantTemplate: true` and a `doctrine.tenantConnectionProvider` class to your datasource:
+
+```yaml
+datasource:
+    -   name: app
+        isPrimary: true
+        url: "pdo_mysql:host=localhost;port=3306;user=root;password=secret"
+        doctrine:
+            entityPaths:
+                - /path/to/entities
+            isDevMode: false
+            tenantTemplate: true
+            tenantConnectionProvider: "App\\MultiTenancy\\AdminDbTenantProvider"
+```
+
+### TenantConnectionProvider Interface
+
+Implement this interface to resolve tenant-specific database parameters at runtime:
+
+```php
+use dev\winterframework\doctrine\multitenancy\TenantConnectionProvider;
+
+class AdminDbTenantProvider implements TenantConnectionProvider {
+
+    public function resolveParams(string $tenantId, array $baseParams): array {
+        // Query your admin database (or any config store) for this tenant
+        // $tenantInfo = $this->adminRepo->findTenant($tenantId);
+
+        return array_merge($baseParams, [
+            'dbname'   => 'tenant_' . $tenantId . '_db',
+            // 'host'     => $tenantInfo->host,
+            // 'user'     => $tenantInfo->username,
+            // 'password' => $tenantInfo->password,
+        ]);
+    }
+}
+```
+
+### Autowiring — Single TenantDoctrineProvider Bean
+
+A multi-tenant datasource exposes **one** autowirable bean:
+
+| Bean Type | Bean Name |
+|-----------|-----------|
+| TenantDoctrineProvider | `{name}-doctrine-tenant` |
+
+```php
+use dev\winterframework\doctrine\multitenancy\TenantDoctrineProvider;
+
+#[Autowired("app-doctrine-tenant")]
+private TenantDoctrineProvider $doctrine;
+```
+
+If the tenant datasource is `isPrimary: true`, you can omit the bean name:
+
+```php
+#[Autowired]
+private TenantDoctrineProvider $doctrine;
+```
+
+### Using the TenantDoctrineProvider
+
+All methods take an explicit `$tenantId` argument — you are responsible for knowing which tenant you're operating on:
+
+```php
+public function doWork(string $tenantId): void {
+    // EntityManager for this tenant
+    $em = $this->doctrine->getEntityManager($tenantId);
+
+    // DBAL Connection for this tenant
+    $conn = $this->doctrine->getConnection($tenantId);
+
+    // ORM Transaction Manager for this tenant
+    $emTxn = $this->doctrine->getEmTransactionManager($tenantId);
+
+    // DBAL Transaction Manager for this tenant
+    $dbalTxn = $this->doctrine->getDbalTransactionManager($tenantId);
+
+    $em->persist($entity);
+    $em->flush();
+}
+```
+
+### Transactions with Multi-Tenancy
+
+Since transactions are tied to a specific tenant, obtain the tenant's transaction manager and use it directly (or wire it into your own transaction orchestration):
+
+```php
+public function executeInTransaction(string $tenantId): void {
+    $emTxn = $this->doctrine->getEmTransactionManager($tenantId);
+    $emTxn->getEntityManager()->persist($entity);
+    // ... use the transaction manager's API directly
+}
+```
+
+### How It Works Internally
+
+- [`TenantDoctrineProvider`](src/multitenancy/TenantDoctrineProvider.php) maintains lazy pools of `tenantId → Connection`, `tenantId → EntityManager`, `tenantId → EmTransactionManager`, and `tenantId → DbalTransactionManager`.
+- On first access for a tenant, it calls `TenantConnectionProvider::resolveParams()` to obtain the tenant's connection parameters, then builds and caches the Doctrine objects.
+- Subsequent calls for the same tenant reuse the cached objects.
+- The tenant ID is **explicit** — there is no hidden thread-local state. The caller always passes `$tenantId`.
+- Non-tenant datasources continue to work exactly as before — only datasources with `tenantTemplate: true` get a `TenantDoctrineProvider` bean.
+
+### Helper Methods
+
+```php
+// Close all cached connections/entity managers
+$this->doctrine->close();
+
+// Evict a specific tenant (force reconnect on next access)
+$this->doctrine->evictTenant('tenant-123');
+
+// List all currently-cached tenant IDs
+$tenantIds = $this->doctrine->getCachedTenantIds();
+```

@@ -10,6 +10,7 @@ use dev\winterframework\txn\TransactionStatus;
 use dev\winterframework\type\TypeAssert;
 use dev\winterframework\util\log\Wlf4p;
 use Doctrine\DBAL\Connection;
+use Override;
 
 class DbalTransactionManager extends AbstractPlatformTransactionManager {
     use Wlf4p;
@@ -25,6 +26,7 @@ class DbalTransactionManager extends AbstractPlatformTransactionManager {
         return $this->connection;
     }
 
+    #[Override]
     protected function doCommit(TransactionStatus $status): void {
         //self::logInfo(__METHOD__ . ' called');
         /** @var DbalTransactionStatus $status */
@@ -32,6 +34,7 @@ class DbalTransactionManager extends AbstractPlatformTransactionManager {
         $status->getTransaction()->commit();
     }
 
+    #[Override]
     protected function doGetTransaction(TransactionDefinition $definition): DbalTransactionStatus {
         //self::logInfo(__METHOD__ . ' called');
         $txn = new DbalTransactionObject($this->getConnection());
@@ -47,6 +50,7 @@ class DbalTransactionManager extends AbstractPlatformTransactionManager {
         return $status;
     }
 
+    #[Override]
     protected function doRollback(TransactionStatus $status): void {
         //self::logInfo(__METHOD__ . ' called');
         /** @var DbalTransactionStatus $status */

@@ -8,6 +8,7 @@ use dev\winterframework\pdbc\ex\SQLFeatureNotSupportedException;
 use dev\winterframework\txn\Savepoint;
 use dev\winterframework\txn\TransactionObject;
 use Doctrine\DBAL\Connection;
+use Override;
 
 class DbalTransactionObject implements TransactionObject {
 
@@ -30,6 +31,7 @@ class DbalTransactionObject implements TransactionObject {
         return $this->previousIsolationLevel;
     }
 
+    #[Override]
     public function begin(): void {
         $this->commitCounter++;
 
@@ -38,6 +40,7 @@ class DbalTransactionObject implements TransactionObject {
         }
     }
 
+    #[Override]
     public function commit(): void {
         $this->commitCounter--;
 
@@ -47,6 +50,7 @@ class DbalTransactionObject implements TransactionObject {
         }
     }
 
+    #[Override]
     public function rollback(): void {
         $this->commitCounter = 0;
 
@@ -56,57 +60,71 @@ class DbalTransactionObject implements TransactionObject {
         $this->connection->rollback();
     }
 
+    #[Override]
     public function flush(): void {
     }
 
+    #[Override]
     public function isRollbackOnly(): bool {
         return $this->isReadOnly();
     }
 
+    #[Override]
     public function setPreviousIsolationLevel(?int $previousIsolationLevel): void {
         $this->previousIsolationLevel = $previousIsolationLevel;
     }
 
+    #[Override]
     public function isCommitted(): bool {
         return $this->committed;
     }
 
+    #[Override]
     public function setCommitted(bool $committed): void {
         $this->committed = $committed;
     }
 
+    #[Override]
     public function isSuspended(): bool {
         return $this->suspended;
     }
 
+    #[Override]
     public function suspend(): void {
         $this->suspended = true;
     }
 
+    #[Override]
     public function resume(): void {
         $this->suspended = false;
     }
 
+    #[Override]
     public function isReadOnly(): bool {
         return $this->readOnly;
     }
 
+    #[Override]
     public function setReadOnly(bool $readOnly): void {
         $this->readOnly = $readOnly;
     }
 
+    #[Override]
     public function isSavepointAllowed(): bool {
         return false;
     }
 
+    #[Override]
     public function rollbackToSavepoint(Savepoint $point): void {
         throw new SQLFeatureNotSupportedException('Savepoint is not supported by DbalDoctrineTransaction Manager');
     }
 
+    #[Override]
     public function releaseSavepoint(Savepoint $point): void {
         throw new SQLFeatureNotSupportedException('Savepoint is not supported by DbalDoctrineTransaction Manager');
     }
 
+    #[Override]
     public function createSavepoint(): Savepoint {
         throw new SQLFeatureNotSupportedException('Savepoint is not supported by DbalDoctrineTransaction Manager');
     }

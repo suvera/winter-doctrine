@@ -11,17 +11,21 @@ use dev\winterframework\core\context\ApplicationContextData;
 use dev\winterframework\core\context\WinterBeanProviderContext;
 use dev\winterframework\doctrine\common\DoctrineComponentBuilder;
 use dev\winterframework\doctrine\dbal\DbalTransactionManager;
+use dev\winterframework\doctrine\multitenancy\TenantDoctrineProvider;
 use dev\winterframework\doctrine\orm\EmTransactionManager;
 use dev\winterframework\exception\NoUniqueBeanDefinitionException;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManager;
+use Override;
 
 #[Module]
 class DoctrineModule  implements WinterModule {
 
+    #[Override]
     public function init(ApplicationContext $ctx, ApplicationContextData $ctxData): void {
     }
 
+    #[Override]
     public function begin(ApplicationContext $ctx, ApplicationContextData $ctxData): void {
         if (!$ctxData->getPropertyContext()->has('datasource')) {
             return;
@@ -43,6 +47,10 @@ class DoctrineModule  implements WinterModule {
 
             $dbalConnBeanName = $beanName . DoctrineComponentBuilder::DOCTRINE_CONN_SUFFIX;
             $dbalTxnBeanName = $beanName . DoctrineComponentBuilder::DOCTRINE_DBAL_TXN_SUFFIX;
+
+            // ── Tenant-aware bean name (only used when tenantTemplate=true) ──
+            $tenantProviderBeanName = $beanName . DoctrineComponentBuilder::DOCTRINE_TENANT_SUFFIX;
+
             if ($ctx->hasBeanByName($emBeanName)) {
                 throw new NoUniqueBeanDefinitionException(
                     'DataSource creation failed, '
@@ -79,6 +87,7 @@ class DoctrineModule  implements WinterModule {
                 );
             }
 
+            // ── Register standard (non-tenant) beans ──
             $beanProvider->registerInternalBeanMethod(
                 $emBeanName,
                 $config->isPrimary() ? EntityManager::class : '',
@@ -114,6 +123,18 @@ class DoctrineModule  implements WinterModule {
                 $config->isPrimary() ? [] : ['name' => $dbalTxnBeanName],
                 false
             );
+
+            // ── Register tenant-aware bean (only if tenantTemplate=true) ──
+            if ($config->isTenantTemplate()) {
+                $beanProvider->registerInternalBeanMethod(
+                    $tenantProviderBeanName,
+                    $config->isPrimary() ? TenantDoctrineProvider::class : '',
+                    $dsBuilder,
+                    'getTenantDoctrineProvider',
+                    ['name' => $tenantProviderBeanName],
+                    false
+                );
+            }
         }
     }
 }

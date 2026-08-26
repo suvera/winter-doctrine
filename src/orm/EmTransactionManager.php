@@ -10,6 +10,7 @@ use dev\winterframework\txn\TransactionStatus;
 use dev\winterframework\type\TypeAssert;
 use dev\winterframework\util\log\Wlf4p;
 use Doctrine\ORM\EntityManager;
+use Override;
 
 class EmTransactionManager extends AbstractPlatformTransactionManager {
     use Wlf4p;
@@ -25,6 +26,7 @@ class EmTransactionManager extends AbstractPlatformTransactionManager {
         return $this->entityManager;
     }
 
+    #[Override]
     protected function doCommit(TransactionStatus $status): void {
         //self::logInfo(__METHOD__ . ' called');
         /** @var EmTransactionStatus $status */
@@ -32,6 +34,7 @@ class EmTransactionManager extends AbstractPlatformTransactionManager {
         $status->getTransaction()->commit();
     }
 
+    #[Override]
     protected function doGetTransaction(TransactionDefinition $definition): EmTransactionStatus {
         //self::logInfo(__METHOD__ . ' called');
         $txn = new EmTransactionObject($this->getEntityManager());
@@ -47,6 +50,7 @@ class EmTransactionManager extends AbstractPlatformTransactionManager {
         return $status;
     }
 
+    #[Override]
     protected function doRollback(TransactionStatus $status): void {
         //self::logInfo(__METHOD__ . ' called');
         /** @var EmTransactionStatus $status */
