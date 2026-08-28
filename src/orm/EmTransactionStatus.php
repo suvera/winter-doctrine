@@ -27,12 +27,10 @@ class EmTransactionStatus implements TransactionStatus {
         return $this->newTransaction;
     }
 
-    #[Override]
     public function isReadOnly(): bool {
         return $this->readOnly;
     }
 
-    #[Override]
     public function isDebug(): bool {
         return $this->debug;
     }
@@ -52,12 +50,10 @@ class EmTransactionStatus implements TransactionStatus {
         return $this->completed;
     }
 
-    #[Override]
     public function setCompleted(bool $completed): void {
         $this->completed = $completed;
     }
 
-    #[Override]
     public function getSavepoint(): Savepoint {
         return $this->savepoint;
     }

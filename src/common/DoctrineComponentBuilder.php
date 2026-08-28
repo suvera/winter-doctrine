@@ -373,6 +373,10 @@ class DoctrineComponentBuilder {
             false
         );
 
+        if (PHP_VERSION_ID >= 80400) {
+            $config->enableNativeLazyObjects(true);
+        }
+
         $obj = new EntityManager($this->buildConnection($ds), $config);
 
         $this->dsObjectMap[$ds] = $obj;

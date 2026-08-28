@@ -144,17 +144,13 @@ private DbalTransactionManager $adminTxnManager;
 ```
 
 
-## How to use Transcations - as AOP
+## How to use Transactions
 
-Articles About winter-boot framework.
+### Declarative Transactions (AOP)
 
-1. [Transaction Management](https://github.com/suvera/winter-boot/blob/master/docs/transactions.md)
-2. [Aspect Oriented Magic](https://github.com/suvera/winter-boot/blob/master/docs/custom_aop.md)
-
-Executing something under ORM/DBAL transaction is pretty easy by just using **Transactional** annotation
+Executing something under ORM/DBAL transaction is easy by just using **#[Transactional]** annotation:
 
 ```phpt
-
 #[Autowired("admindb-doctrine-em")]
 private EntityManager $adminEm;
 
@@ -166,7 +162,201 @@ public function executeInTransaction(): void {
     }
     // do more things here
 }
+```
 
+### Programmatic Transactions
+
+For fine-grained control, use `EmTransactionManager` (ORM) or `DbalTransactionManager` (DBAL) with the `getTransaction()`/`commit()`/`rollback()` pattern.
+
+#### ORM Example — UserService with EmTransactionManager
+
+```phpt
+use dev\winterframework\doctrine\orm\EmTransactionManager;
+use dev\winterframework\stereotype\Autowired;
+use dev\winterframework\stereotype\Service;
+use dev\winterframework\txn\support\DefaultTransactionDefinition;
+use dev\winterframework\util\log\Wlf4p;
+use Doctrine\ORM\EntityManager;
+
+#[Service]
+class UserService {
+    use Wlf4p;
+
+    #[Autowired]
+    private EmTransactionManager $txnManager;
+
+    private function getEm(): EntityManager {
+        return $this->txnManager->getEntityManager();
+    }
+
+    public function createUser(User $user): User
+    {
+        $status = $this->txnManager->getTransaction(new DefaultTransactionDefinition());
+        try {
+            $this->getEm()->persist($user);
+            $this->getEm()->flush();
+            $this->txnManager->commit($status);
+            return $user;
+        } catch (\Throwable $e) {
+            $this->txnManager->rollback($status);
+            throw $e;
+        }
+    }
+
+    public function updateUser(User $user): User
+    {
+        $status = $this->txnManager->getTransaction(new DefaultTransactionDefinition());
+        try {
+            $existing = $this->getEm()->find(User::class, $user->getId());
+            if ($existing) {
+                $existing->setName($user->getName());
+                $existing->setEmail($user->getEmail());
+                $existing->setAge($user->getAge());
+                $this->getEm()->flush();
+            }
+            $this->txnManager->commit($status);
+            return $user;
+        } catch (\Throwable $e) {
+            $this->txnManager->rollback($status);
+            throw $e;
+        }
+    }
+
+    public function deleteUser(int $id): bool
+    {
+        $status = $this->txnManager->getTransaction(new DefaultTransactionDefinition());
+        try {
+            $user = $this->getEm()->find(User::class, $id);
+            if ($user) {
+                $this->getEm()->remove($user);
+                $this->getEm()->flush();
+                $this->txnManager->commit($status);
+                return true;
+            }
+            $this->txnManager->commit($status);
+            return false;
+        } catch (\Throwable $e) {
+            $this->txnManager->rollback($status);
+            throw $e;
+        }
+    }
+
+    public function findById(int $id): ?User
+    {
+        return $this->getEm()->find(User::class, $id);
+    }
+
+    public function findAll(): array
+    {
+        return $this->getEm()->getRepository(User::class)->findAll();
+    }
+
+    public function findByEmail(string $email): ?User
+    {
+        return $this->getEm()->getRepository(User::class)->findOneBy(['email' => $email]);
+    }
+}
+```
+
+#### DBAL Example — UserDbalService with DbalTransactionManager
+
+```phpt
+use dev\winterframework\doctrine\dbal\DbalTransactionManager;
+use dev\winterframework\stereotype\Autowired;
+use dev\winterframework\stereotype\Service;
+use dev\winterframework\txn\support\DefaultTransactionDefinition;
+use dev\winterframework\util\log\Wlf4p;
+use Doctrine\DBAL\Connection;
+
+#[Service]
+class UserDbalService {
+    use Wlf4p;
+
+    #[Autowired("defaultdb-doctrine-dbal")]
+    private Connection $conn;
+
+    #[Autowired("defaultdb-doctrine-dbaltxn")]
+    private DbalTransactionManager $txnManager;
+
+    public function createUser(User $user): User
+    {
+        $status = $this->txnManager->getTransaction(new DefaultTransactionDefinition());
+        try {
+            $this->conn->executeStatement(
+                "INSERT INTO doctrine_users (name, email, age) VALUES (:name, :email, :age)",
+                ['name' => $user->getName(), 'email' => $user->getEmail(), 'age' => $user->getAge()]
+            );
+            $user->setId((int) $this->conn->lastInsertId());
+            $this->txnManager->commit($status);
+            return $user;
+        } catch (\Throwable $e) {
+            $this->txnManager->rollback($status);
+            throw $e;
+        }
+    }
+
+    public function updateUser(User $user): User
+    {
+        $status = $this->txnManager->getTransaction(new DefaultTransactionDefinition());
+        try {
+            $this->conn->executeStatement(
+                "UPDATE doctrine_users SET name = :name, email = :email, age = :age WHERE id = :id",
+                ['name' => $user->getName(), 'email' => $user->getEmail(), 'age' => $user->getAge(), 'id' => $user->getId()]
+            );
+            $this->txnManager->commit($status);
+            return $user;
+        } catch (\Throwable $e) {
+            $this->txnManager->rollback($status);
+            throw $e;
+        }
+    }
+
+    public function deleteUser(int $id): bool
+    {
+        $status = $this->txnManager->getTransaction(new DefaultTransactionDefinition());
+        try {
+            $affected = $this->conn->executeStatement(
+                "DELETE FROM doctrine_users WHERE id = :id",
+                ['id' => $id]
+            );
+            $this->txnManager->commit($status);
+            return $affected > 0;
+        } catch (\Throwable $e) {
+            $this->txnManager->rollback($status);
+            throw $e;
+        }
+    }
+
+    public function findById(int $id): ?User
+    {
+        $row = $this->conn->fetchAssociative(
+            "SELECT * FROM doctrine_users WHERE id = :id",
+            ['id' => $id]
+        );
+        if (!$row) return null;
+        return new User((int) $row['id'], $row['name'], $row['email'], isset($row['age']) ? (int) $row['age'] : null);
+    }
+
+    public function findAll(): array
+    {
+        $rows = $this->conn->fetchAllAssociative("SELECT * FROM doctrine_users ORDER BY id");
+        $users = [];
+        foreach ($rows as $row) {
+            $users[] = new User((int) $row['id'], $row['name'], $row['email'], isset($row['age']) ? (int) $row['age'] : null);
+        }
+        return $users;
+    }
+
+    public function findByEmail(string $email): ?User
+    {
+        $row = $this->conn->fetchAssociative(
+            "SELECT * FROM doctrine_users WHERE email = :email",
+            ['email' => $email]
+        );
+        if (!$row) return null;
+        return new User((int) $row['id'], $row['name'], $row['email'], isset($row['age']) ? (int) $row['age'] : null);
+    }
+}
 ```
 
 ---

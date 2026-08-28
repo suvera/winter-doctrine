@@ -72,7 +72,6 @@ class EmTransactionObject implements TransactionObject {
         return $this->isReadOnly();
     }
 
-    #[Override]
     public function setPreviousIsolationLevel(?int $previousIsolationLevel): void {
         $this->previousIsolationLevel = $previousIsolationLevel;
     }
@@ -82,7 +81,6 @@ class EmTransactionObject implements TransactionObject {
         return $this->committed;
     }
 
-    #[Override]
     public function setCommitted(bool $committed): void {
         $this->committed = $committed;
     }
@@ -107,7 +105,6 @@ class EmTransactionObject implements TransactionObject {
         return $this->readOnly;
     }
 
-    #[Override]
     public function setReadOnly(bool $readOnly): void {
         $this->readOnly = $readOnly;
     }
