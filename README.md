@@ -40,6 +40,8 @@ datasource:
         url: "sqlite::memory:"
         username: xxxxx
         password: xxzzz
+        migrations:
+            enabled: false
         doctrine:
             entityPaths:
                 - /path/to/defaultdb/entities
@@ -49,6 +51,8 @@ datasource:
         url: "mysql:host=localhost;port=3307;dbname=testdb"
         username: xxxxx
         password: xxzzz
+        migrations:
+            enabled: true
         doctrine:
             entityPaths:
                 - /path/to/admindb/entities
@@ -373,6 +377,8 @@ You can configure multi-tenant data sources directly in your `application.yml` b
 multitenant-datasource:
     - name: "tenantdb"
       url: "mysql:host=localhost;port=3306"
+      migrations:
+          enabled: true
       providerClass: "App\\Config\\MyTenantDataSourceProvider"
 ```
 
@@ -474,9 +480,13 @@ If you have multiple multi-tenant data sources:
 multitenant-datasource:
     - name: "regionDb"
       url: "mysql:host=localhost;port=3306"
+      migrations:
+          enabled: true
       providerClass: "App\\Config\\RegionTenantProvider"
     - name: "productDb"
       url: "mysql:host=localhost;port=3306"
+      migrations:
+          enabled: true
       providerClass: "App\\Config\\ProductTenantProvider"
 ```
 
