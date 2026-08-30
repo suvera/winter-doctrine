@@ -11,9 +11,14 @@ use dev\winterframework\core\context\ApplicationContextData;
 use dev\winterframework\core\context\WinterBeanProviderContext;
 use dev\winterframework\doctrine\common\DoctrineComponentBuilder;
 use dev\winterframework\doctrine\dbal\DbalTransactionManager;
-use dev\winterframework\doctrine\multitenancy\TenantDoctrineProvider;
+use dev\winterframework\doctrine\multitenancy\MultiTenantManager;
 use dev\winterframework\doctrine\orm\EmTransactionManager;
+use dev\winterframework\exception\BeansDependencyException;
+use dev\winterframework\exception\ClassNotFoundException;
 use dev\winterframework\exception\NoUniqueBeanDefinitionException;
+use dev\winterframework\exception\WinterException;
+use dev\winterframework\pdbc\multitenant\TenantDataSourceProvider;
+use dev\winterframework\type\TypeAssert;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManager;
 use Override;
@@ -27,6 +32,58 @@ class DoctrineModule  implements WinterModule {
 
     #[Override]
     public function begin(ApplicationContext $ctx, ApplicationContextData $ctxData): void {
+        $this->registerMultiTenantDataSources($ctx, $ctxData);
+        $this->registerStandardDataSources($ctx, $ctxData);
+    }
+
+    private function registerMultiTenantDataSources(ApplicationContext $ctx, ApplicationContextData $ctxData): void {
+        if (!$ctxData->getPropertyContext()->has('multitenant-datasource')) {
+            return;
+        }
+
+        $mts = $ctxData->getPropertyContext()->get('multitenant-datasource');
+        if (!is_array($mts) || empty($mts)) {
+            return;
+        }
+
+        foreach ($mts as $mtDs) {
+            if (!isset($mtDs['name'])) {
+                throw new WinterException(
+                    'multitenant-datasource DataSource configured without "name" parameter'
+                );
+            }
+            if (!isset($mtDs['providerClass'])) {
+                throw new WinterException(
+                    'multitenant-datasource DataSource configured without "providerClass" parameter'
+                );
+            }
+
+            if (!class_exists($mtDs['providerClass'], true)) {
+                throw new ClassNotFoundException(
+                    'multitenant-datasource providerClass does not exist "' . $mtDs['providerClass'] . '"'
+                );
+            }
+
+            TypeAssert::objectOfIsA(
+                $mtDs['providerClass'],
+                TenantDataSourceProvider::class,
+                'multitenant-datasource "providerClass" must be derived from ' . TenantDataSourceProvider::class
+            );
+
+            $providerClass = $mtDs['providerClass'];
+            $beanProvider = $ctxData->getBeanProvider();
+
+            $mtManager = new MultiTenantManager($providerClass, $ctx);
+            $beanProvider->registerInternalBean(
+                $mtManager,
+                MultiTenantManager::class,
+                true,
+                $mtDs['name'] . '-manager'
+            );
+        }
+    }
+
+    private function registerStandardDataSources(ApplicationContext $ctx, ApplicationContextData $ctxData): void {
         if (!$ctxData->getPropertyContext()->has('datasource')) {
             return;
         }
@@ -47,9 +104,6 @@ class DoctrineModule  implements WinterModule {
 
             $dbalConnBeanName = $beanName . DoctrineComponentBuilder::DOCTRINE_CONN_SUFFIX;
             $dbalTxnBeanName = $beanName . DoctrineComponentBuilder::DOCTRINE_DBAL_TXN_SUFFIX;
-
-            // ── Tenant-aware bean name (only used when tenantTemplate=true) ──
-            $tenantProviderBeanName = $beanName . DoctrineComponentBuilder::DOCTRINE_TENANT_SUFFIX;
 
             if ($ctx->hasBeanByName($emBeanName)) {
                 throw new NoUniqueBeanDefinitionException(
@@ -123,18 +177,6 @@ class DoctrineModule  implements WinterModule {
                 $config->isPrimary() ? [] : ['name' => $dbalTxnBeanName],
                 false
             );
-
-            // ── Register tenant-aware bean (only if tenantTemplate=true) ──
-            if ($config->isTenantTemplate()) {
-                $beanProvider->registerInternalBeanMethod(
-                    $tenantProviderBeanName,
-                    $config->isPrimary() ? TenantDoctrineProvider::class : '',
-                    $dsBuilder,
-                    'getTenantDoctrineProvider',
-                    ['name' => $tenantProviderBeanName],
-                    false
-                );
-            }
         }
     }
 }
