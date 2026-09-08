@@ -13,7 +13,6 @@ use dev\winterframework\doctrine\common\DoctrineComponentBuilder;
 use dev\winterframework\doctrine\dbal\DbalTransactionManager;
 use dev\winterframework\doctrine\multitenancy\MultiTenantManager;
 use dev\winterframework\doctrine\orm\EmTransactionManager;
-use dev\winterframework\exception\BeansDependencyException;
 use dev\winterframework\exception\ClassNotFoundException;
 use dev\winterframework\exception\NoUniqueBeanDefinitionException;
 use dev\winterframework\exception\WinterException;
@@ -21,6 +20,9 @@ use dev\winterframework\pdbc\multitenant\TenantDataSourceProvider;
 use dev\winterframework\type\TypeAssert;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManager;
+use Doctrine\DBAL\Types\Type;
+use Doctrine\DBAL\Types\Types;
+use dev\winterframework\doctrine\common\TolerantDateTimeTzImmutableType;
 use Override;
 
 #[Module]
@@ -28,6 +30,7 @@ class DoctrineModule  implements WinterModule {
 
     #[Override]
     public function init(ApplicationContext $ctx, ApplicationContextData $ctxData): void {
+        Type::overrideType(Types::DATETIMETZ_IMMUTABLE, TolerantDateTimeTzImmutableType::class);
     }
 
     #[Override]
