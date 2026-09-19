@@ -5,11 +5,11 @@ declare(strict_types=1);
 namespace dev\winterframework\doctrine\multitenancy;
 
 use dev\winterframework\core\context\ApplicationContext;
-use dev\winterframework\doctrine\coroutine\CoroutineScopeProvider;
-use dev\winterframework\doctrine\coroutine\CoroutineScopeProviders;
-use dev\winterframework\doctrine\coroutine\CoroutineScopedPool;
+use dev\winterframework\coroutine\CoroutineScopeProvider;
+use dev\winterframework\coroutine\CoroutineScopeProviders;
+use dev\winterframework\coroutine\CoroutineScopedPool;
 use dev\winterframework\doctrine\common\OrmConfigurationFactory;
-use dev\winterframework\doctrine\coroutine\SwooleCoroutineScopeProvider;
+use dev\winterframework\coroutine\SwooleCoroutineScopeProvider;
 use dev\winterframework\doctrine\dbal\WinterConnection;
 use dev\winterframework\doctrine\orm\WinterEntityManager;
 use dev\winterframework\exception\BeansDependencyException;
@@ -106,6 +106,16 @@ class MultiTenantManager {
     private int $maxDelegates = 50;
     private int $maxWaitMs = 5000;
 
+    /**
+     * Shipped pool defaults. A tenant config still carrying these values
+     * is treated as "no per-tenant override" and the global caps apply:
+     * Track A's getters are non-nullable, so an untouched config cannot
+     * be told apart from one explicitly set to the defaults, and that
+     * edge collapses toward the global, which is the safe direction.
+     */
+    private const SHIPPED_DEFAULT_MAX_DELEGATES = 50;
+    private const SHIPPED_DEFAULT_MAX_WAIT_MS = 5000;
+
     public function __construct(
         private string $providerClassName,
         private ApplicationContext $appCtx,
@@ -126,6 +136,32 @@ class MultiTenantManager {
 
     public function setCoroutineScoped(bool $coroutineScoped): void {
         $this->coroutineScoped = $coroutineScoped;
+    }
+
+    /**
+     * Pool caps for one tenant: the per-datasource `connection.*`
+     * overrides win (read off the tenant config's Track A getters when
+     * winter-boot exposes them), then the global caps, then the shipped
+     * defaults (50 connections, 5000ms wait).
+     *
+     * @return array{0: int, 1: int} [maxDelegates, maxWaitMs]
+     */
+    private function resolvePoolCaps(DataSourceConfig $config): array {
+        $max = $this->maxDelegates;
+        if (method_exists($config, 'getMaxConnections')) {
+            $perDs = (int)$config->getMaxConnections();
+            if ($perDs !== self::SHIPPED_DEFAULT_MAX_DELEGATES) {
+                $max = $perDs;
+            }
+        }
+        $wait = $this->maxWaitMs;
+        if (method_exists($config, 'getMaxWaitMs')) {
+            $perDs = (int)$config->getMaxWaitMs();
+            if ($perDs !== self::SHIPPED_DEFAULT_MAX_WAIT_MS) {
+                $wait = $perDs;
+            }
+        }
+        return [max(0, $max), max(0, $wait)];
     }
 
     /**
@@ -237,6 +273,7 @@ class MultiTenantManager {
             return $facade;
         }
         if (!isset($this->emPools[$tenantId])) {
+            [$maxDelegates, $maxWaitMs] = $this->resolvePoolCaps($this->getTenantConfig($tenantId));
             $this->emPools[$tenantId] = new CoroutineScopedPool(
                 fn() => $this->buildDelegateEntityManager($tenantId),
                 $this->scopes,
@@ -246,8 +283,8 @@ class MultiTenantManager {
                 fn(EntityManager $em) => $em->isOpen(),
                 null,
                 $tenantId . '-em',
-                $this->maxDelegates,
-                $this->maxWaitMs
+                $maxDelegates,
+                $maxWaitMs
             );
         }
         $facade = WinterEntityManager::create($this->emPools[$tenantId]);
@@ -261,6 +298,7 @@ class MultiTenantManager {
             return $facade;
         }
         if (!isset($this->connPools[$tenantId])) {
+            [$maxDelegates, $maxWaitMs] = $this->resolvePoolCaps($this->getTenantConfig($tenantId));
             $this->connPools[$tenantId] = new CoroutineScopedPool(
                 fn() => $this->buildDelegateConnection($tenantId),
                 $this->scopes,
@@ -270,8 +308,8 @@ class MultiTenantManager {
                 null,
                 null,
                 $tenantId . '-dbal',
-                $this->maxDelegates,
-                $this->maxWaitMs
+                $maxDelegates,
+                $maxWaitMs
             );
         }
         $facade = WinterConnection::create($this->connPools[$tenantId]);

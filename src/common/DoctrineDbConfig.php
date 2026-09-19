@@ -19,6 +19,11 @@ class DoctrineDbConfig extends DataSourceConfig {
 
     protected array $doctrineOptions = [];
 
+    // Pool caps (`connection.maxConnections` / `connection.maxWaitMs`)
+    // are inherited from winter-boot's DataSourceConfig (Track A): the
+    // per-datasource getters getMaxConnections()/getMaxWaitMs() carry
+    // explicit overrides, defaulting to the shipped 50/5000.
+
 
     public function getEntityPaths(): array {
         return $this->entityPaths;

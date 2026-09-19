@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace dev\winterframework\doctrine\dbal;
 
-use dev\winterframework\doctrine\coroutine\CoroutineScopedPool;
+use dev\winterframework\coroutine\CoroutineScopedPool;
 use Doctrine\DBAL\Connection;
 use Override;
 use ReflectionClass;

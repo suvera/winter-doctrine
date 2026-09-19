@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace dev\winterframework\doctrine\orm;
 
-use dev\winterframework\doctrine\coroutine\CoroutineScopedPool;
+use dev\winterframework\coroutine\CoroutineScopedPool;
 use Doctrine\ORM\EntityManager;
 use Override;
 use ReflectionClass;

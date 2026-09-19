@@ -16,10 +16,10 @@ use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\EntityManager;
 use dev\winterframework\doctrine\dbal\DbalTransactionManager;
 use dev\winterframework\doctrine\dbal\WinterConnection;
-use dev\winterframework\doctrine\coroutine\CoroutineScopeProvider;
-use dev\winterframework\doctrine\coroutine\CoroutineScopeProviders;
-use dev\winterframework\doctrine\coroutine\CoroutineScopedPool;
-use dev\winterframework\doctrine\coroutine\SwooleCoroutineScopeProvider;
+use dev\winterframework\coroutine\CoroutineScopeProvider;
+use dev\winterframework\coroutine\CoroutineScopeProviders;
+use dev\winterframework\coroutine\CoroutineScopedPool;
+use dev\winterframework\coroutine\SwooleCoroutineScopeProvider;
 use dev\winterframework\doctrine\orm\EmTransactionManager;
 use dev\winterframework\doctrine\orm\WinterEntityManager;
 use Doctrine\Common\EventManager;
@@ -77,23 +77,23 @@ class DoctrineComponentBuilder {
 
     /**
      * Kill switch / opt-in flag (application.yml):
-     * `doctrine.coroutineScopedEntityManagers`. Defaults to on under Swoole,
+     * `winter.coroutine.db.enabled`. Defaults to on under Swoole,
      * off without it.
      */
-    const COROUTINE_SCOPED_FLAG = 'doctrine.coroutineScopedEntityManagers';
+    const COROUTINE_SCOPED_FLAG = 'winter.coroutine.db.enabled';
 
     /**
      * Cap on concurrent scoped DB connections per pool (shipped as 50,
      * 0 = unlimited but not recommended).
-     * application.yml: `doctrine.coroutineMaxDelegates`.
+     * application.yml: `winter.coroutine.db.maxConnections`.
      */
-    const COROUTINE_MAX_DELEGATES_FLAG = 'doctrine.coroutineMaxDelegates';
+    const COROUTINE_MAX_DELEGATES_FLAG = 'winter.coroutine.db.maxConnections';
 
     /**
      * How long a new scope waits for a free DB connection before giving up.
-     * application.yml: `doctrine.coroutineMaxWaitMs` (default 5000).
+     * application.yml: `winter.coroutine.db.maxWaitMs` (default 5000).
      */
-    const COROUTINE_MAX_WAIT_MS_FLAG = 'doctrine.coroutineMaxWaitMs';
+    const COROUTINE_MAX_WAIT_MS_FLAG = 'winter.coroutine.db.maxWaitMs';
 
     private bool $coroutineScoped = false;
     private int $maxDelegates = 50;
@@ -128,9 +128,9 @@ class DoctrineComponentBuilder {
         $this->dsObjectMap = new WeakMap();
         $this->dsConnectMap = new WeakMap();
         $this->scopes = CoroutineScopeProviders::create();
+        [$this->maxDelegates, $this->maxWaitMs] = $this->resolveCoroutineCaps();
         $this->init($dataSources);
         $this->coroutineScoped = $this->resolveCoroutineScoping();
-        [$this->maxDelegates, $this->maxWaitMs] = $this->resolveCoroutineCaps();
     }
 
     public function getMaxDelegates(): int {
@@ -158,6 +158,21 @@ class DoctrineComponentBuilder {
             self::logException($e, 'Could not read ' . self::COROUTINE_SCOPED_FLAG);
         }
         return SwooleCoroutineScopeProvider::isAvailable();
+    }
+
+    /**
+     * Pool caps for one datasource, read off the per-datasource
+     * `connection.*` getters. Resolution order is per-datasource
+     * `connection.*` override, then the global keys, then the shipped
+     * defaults (50 connections, 5000ms wait): init() seeds each fresh
+     * config with the resolved globals before mapping, so an explicitly
+     * configured per-datasource value overwrites the global while an
+     * absent one inherits it.
+     *
+     * @return array{0: int, 1: int} [maxDelegates, maxWaitMs]
+     */
+    private function resolvePoolCaps(DoctrineDbConfig $ds): array {
+        return [max(0, $ds->getMaxConnections()), max(0, $ds->getMaxWaitMs())];
     }
 
     /**
@@ -201,6 +216,12 @@ class DoctrineComponentBuilder {
             );
 
             $ds = new DoctrineDbConfig();
+            // Seed the per-datasource caps with the resolved globals, so
+            // the order holds: an explicit connection.* override mapped
+            // below wins, otherwise the global key (or the shipped
+            // 50/5000 default) applies.
+            $ds->setMaxConnections($this->maxDelegates);
+            $ds->setMaxWaitMs($this->maxWaitMs);
             try {
                 ObjectCreator::mapObject($ds, $dataSource, $ref);
             } catch (Throwable $e) {
@@ -430,6 +451,7 @@ class DoctrineComponentBuilder {
         $ds = $this->dsConfig[$name];
         $pool = $this->emPools[$name] ?? null;
         if ($pool === null) {
+            [$maxDelegates, $maxWaitMs] = $this->resolvePoolCaps($ds);
             $pool = new CoroutineScopedPool(
                 fn() => $this->buildDelegateEntityManager($ds),
                 $this->scopes,
@@ -439,8 +461,8 @@ class DoctrineComponentBuilder {
                 fn(EntityManager $em) => $em->isOpen(),
                 null,
                 $name . '-em',
-                $this->maxDelegates,
-                $this->maxWaitMs
+                $maxDelegates,
+                $maxWaitMs
             );
             $this->emPools[$name] = $pool;
         }
@@ -460,6 +482,7 @@ class DoctrineComponentBuilder {
         $ds = $this->dsConfig[$name];
         $pool = $this->connPools[$name] ?? null;
         if ($pool === null) {
+            [$maxDelegates, $maxWaitMs] = $this->resolvePoolCaps($ds);
             $pool = new CoroutineScopedPool(
                 fn() => $this->buildFreshConnection($ds),
                 $this->scopes,
@@ -469,8 +492,8 @@ class DoctrineComponentBuilder {
                 null,
                 null,
                 $name . '-dbal',
-                $this->maxDelegates,
-                $this->maxWaitMs
+                $maxDelegates,
+                $maxWaitMs
             );
             $this->connPools[$name] = $pool;
         }

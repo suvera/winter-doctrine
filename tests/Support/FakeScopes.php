@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace WinterDoctrineTest\Support;
 
-use dev\winterframework\doctrine\coroutine\CoroutineScopeProvider;
+use dev\winterframework\coroutine\CoroutineScopeProvider;
 
 /**
  * Fake coroutine scopes for tests: emulates coroutines A, B, ... with

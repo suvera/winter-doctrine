@@ -184,8 +184,10 @@ You can turn the whole thing off with one flag (it is on under Swoole and
 off without it):
 
 ```yaml
-doctrine:
-    coroutineScopedEntityManagers: true   # kill switch: set to false to restore old behavior
+winter:
+    coroutine:
+        db:
+            enabled: true   # kill switch: set to false to restore old behavior
 ```
 
 Four rules to stay out of trouble:
@@ -213,7 +215,7 @@ Four rules to stay out of trouble:
    it gets a blank notebook, and you never have to think about it again:
 
    ```php
-   use dev\winterframework\doctrine\coroutine\CoroutineRunner;
+   use dev\winterframework\coroutine\CoroutineRunner;
 
    while (true) {
        // Each batch runs with a fresh notebook, then throws it away.
@@ -241,18 +243,38 @@ Four rules to stay out of trouble:
    `application.yml`:
 
    ```yaml
-   doctrine:
-       coroutineMaxDelegates: 50  # max open DB connections per pool, 0 = unlimited (not recommended)
-       coroutineMaxWaitMs: 5000   # how long to wait for a free connection before failing
+   winter:
+       coroutine:
+           db:
+               maxConnections: 50  # max open DB connections per pool, 0 = unlimited (not recommended)
+               maxWaitMs: 5000     # how long to wait for a free connection before failing
+   ```
+
+   A single datasource can override both caps in its own `connection`
+   block (the override wins over the global defaults):
+
+   ```yaml
+   datasource:
+       -   name: defaultdb
+           # ...
+           connection:
+               maxConnections: 50
+               maxWaitMs: 5000
    ```
 
    How to size the cap: add up every pool (one EntityManager pool plus one
-   DBAL pool per datasource, per tenant), multiply by your Swoole worker
-   count, and keep the total below the database's `max_connections`
+   DBAL pool per datasource, per tenant — using each datasource's override
+   where one is set), multiply by your Swoole worker count, and keep the
+   total below the database's `max_connections`
    (MySQL defaults to 151, Postgres to 100). When in doubt, keep 50 and
    raise the database limit first — a loud `PoolExhaustedException` telling
    you to raise the cap is always better than a cryptic "too many
    connections" from the database at 3 AM.
+
+   If the coroutine machinery itself fails, the failure is logged and the
+   request degrades instead of crashing — but pool exhaustion stays loud:
+   it still throws `PoolExhaustedException` rather than silently sharing
+   a connection.
 
 ## How to use Transactions
 

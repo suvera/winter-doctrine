@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-// Focused test for the pool cap (doctrine.coroutineMaxDelegates /
-// doctrine.coroutineMaxWaitMs). Run with: php tests/run.php
+// Focused test for the pool cap (winter.coroutine.db.maxConnections /
+// winter.coroutine.db.maxWaitMs). Run with: php tests/run.php
 // Needs no database and no Swoole extension.
 
-use dev\winterframework\doctrine\coroutine\CoroutineScopeProvider;
-use dev\winterframework\doctrine\coroutine\CoroutineScopedPool;
-use dev\winterframework\doctrine\coroutine\PoolExhaustedException;
+use dev\winterframework\coroutine\CoroutineScopeProvider;
+use dev\winterframework\coroutine\CoroutineScopedPool;
+use dev\winterframework\coroutine\PoolExhaustedException;
 use dev\winterframework\doctrine\orm\WinterEntityManager;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\EntityManager;
@@ -19,6 +19,7 @@ use WinterDoctrineTest\Support\Checks;
 use WinterDoctrineTest\Support\FakeScopes;
 
 require_once __DIR__ . '/bootstrap.php';
+require_once __DIR__ . '/Support/FakeScopes.php';
 
 $config = ORMSetup::createAttributeMetadataConfig(
     [__DIR__ . '/Fixture'],

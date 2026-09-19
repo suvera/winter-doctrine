@@ -10,7 +10,7 @@ use dev\winterframework\core\context\ApplicationContext;
 use dev\winterframework\core\context\ApplicationContextData;
 use dev\winterframework\core\context\WinterBeanProviderContext;
 use dev\winterframework\doctrine\common\DoctrineComponentBuilder;
-use dev\winterframework\doctrine\coroutine\SwooleCoroutineScopeProvider;
+use dev\winterframework\coroutine\SwooleCoroutineScopeProvider;
 use dev\winterframework\doctrine\dbal\DbalTransactionManager;
 use dev\winterframework\doctrine\multitenancy\MultiTenantManager;
 use dev\winterframework\doctrine\orm\EmTransactionManager;

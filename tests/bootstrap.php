@@ -20,5 +20,6 @@ if (!trait_exists('dev\winterframework\util\log\Wlf4p')) {
 }
 
 require_once __DIR__ . '/Fixture/Widget.php';
-require_once __DIR__ . '/Support/FakeScopes.php';
 require_once __DIR__ . '/Support/Checks.php';
+// NOTE: Support/FakeScopes.php implements a winter-boot interface and is
+// required only by tests that also need the boot-owned pool (see run.php).
