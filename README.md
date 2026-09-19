@@ -148,6 +148,112 @@ private DbalTransactionManager $adminTxnManager;
 ```
 
 
+## Coroutine-scoped EntityManagers (Swoole)
+
+Think of the `EntityManager` as a notebook. It remembers every database row
+your code has touched, so it does not have to ask the database twice. That
+is great inside one request — and dangerous on a Swoole server, where one
+worker handles hundreds of requests one after another. Without protection,
+request number 2 would read request number 1's old notes instead of fresh
+data from the database. Worse, two requests running at the same time would
+scribble in the same notebook and corrupt each other's unflushed changes.
+
+This library fixes that for you, automatically. Under Swoole, every request
+(or job, or message) silently gets its own blank notebook with its own
+database connection. When the request finishes, its notebook is thrown away.
+You change nothing in your code.
+
+Your existing code keeps working exactly as it is:
+
+```php
+#[Autowired]
+private EntityManager $defaultEm;
+
+public function findUser(int $id): ?User {
+    // Always fresh data. Always isolated from other requests.
+    return $this->defaultEm->find(User::class, $id);
+}
+```
+
+Bean names, `instanceof EntityManager` checks, type-hints, and both
+transaction styles (`#[Transactional]` and `EmTransactionManager`) all work
+unchanged. Code paths that never touch the database allocate nothing, and
+short-lived CLI scripts behave exactly as before.
+
+You can turn the whole thing off with one flag (it is on under Swoole and
+off without it):
+
+```yaml
+doctrine:
+    coroutineScopedEntityManagers: true   # kill switch: set to false to restore old behavior
+```
+
+Four rules to stay out of trouble:
+
+1. **Always use the injected `EntityManager` itself.** Do NOT save things it
+   gives you (`getRepository()` results, query builders) into a property and
+   reuse them later — those belong to one request's notebook, which gets
+   thrown away. Fetch them fresh from the `EntityManager` every time:
+
+   ```php
+   // WRONG: this repository dies with the first request's notebook.
+   private EntityRepository $userRepo;
+
+   // RIGHT: ask the EntityManager every time.
+   $this->defaultEm->getRepository(User::class)->find($id);
+   ```
+
+2. **Keep event listeners stateless.** One shared event dispatcher serves all
+   requests, so a listener that stores things in its own properties will mix
+   up requests. Compute from the event, store nothing.
+
+3. **Long-running loops are the one exception.** A daemon or scheduler that
+   processes 10,000 items inside a single never-ending task reuses one
+   notebook for all 10,000 items — and it keeps growing. Wrap each round so
+   it gets a blank notebook, and you never have to think about it again:
+
+   ```php
+   use dev\winterframework\doctrine\coroutine\CoroutineRunner;
+
+   while (true) {
+       // Each batch runs with a fresh notebook, then throws it away.
+       CoroutineRunner::runInFreshCoroutine(fn() => $this->processNextBatch());
+   }
+   ```
+
+   You do NOT need this helper for normal controllers, services, SQS/Kafka
+   consumers, or scheduled jobs. Those already get a fresh notebook per run.
+   Only loops that never end need it.
+
+4. **One database connection per concurrent request, with a safety cap.**
+   A blank notebook is useless without its own pen: every request that
+   touches the database opens its own real database connection, so two
+   requests can never share (and corrupt) one. Requests that never touch
+   the database open none, and every connection is closed when its request
+   finishes. The log line `Doctrine open DB connections: {...}` shows you
+   the live count per pool — watch it after deploys.
+
+   To stop a runaway fan-out from exhausting the database, each pool is
+   capped at **50 open connections**. When all 50 are busy, the next
+   request waits up to **5 seconds** for one to free up; if none does, it
+   fails fast with a clear `PoolExhaustedException` instead of silently
+   sharing (sharing would bring back the corruption bug). Tune both in
+   `application.yml`:
+
+   ```yaml
+   doctrine:
+       coroutineMaxDelegates: 50  # max open DB connections per pool, 0 = unlimited (not recommended)
+       coroutineMaxWaitMs: 5000   # how long to wait for a free connection before failing
+   ```
+
+   How to size the cap: add up every pool (one EntityManager pool plus one
+   DBAL pool per datasource, per tenant), multiply by your Swoole worker
+   count, and keep the total below the database's `max_connections`
+   (MySQL defaults to 151, Postgres to 100). When in doubt, keep 50 and
+   raise the database limit first — a loud `PoolExhaustedException` telling
+   you to raise the cap is always better than a cryptic "too many
+   connections" from the database at 3 AM.
+
 ## How to use Transactions
 
 ### Declarative Transactions (AOP)
