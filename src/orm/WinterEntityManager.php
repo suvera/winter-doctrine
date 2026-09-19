@@ -148,7 +148,7 @@ class WinterEntityManager extends EntityManager {
     }
 
     #[Override]
-    public function find($className, mixed $id, ?LockMode $lockMode = LockMode::NONE, ?int $lockVersion = NULL): ?object {
+    public function find($className, mixed $id, LockMode|int|null $lockMode = LockMode::NONE, ?int $lockVersion = null): ?object {
         return $this->pool->current()->find($className, $id, $lockMode, $lockVersion);
     }
 
@@ -173,7 +173,7 @@ class WinterEntityManager extends EntityManager {
     }
 
     #[Override]
-    public function refresh(object $object, ?LockMode $lockMode = LockMode::NONE): void {
+    public function refresh(object $object, LockMode|int|null $lockMode = LockMode::NONE): void {
         $this->pool->current()->refresh($object, $lockMode);
     }
 
@@ -183,7 +183,7 @@ class WinterEntityManager extends EntityManager {
     }
 
     #[Override]
-    public function lock(object $entity, LockMode $lockMode, DateTimeInterface|int|null $lockVersion = NULL): void {
+    public function lock(object $entity, LockMode|int $lockMode, DateTimeInterface|int|null $lockVersion = null): void {
         $this->pool->current()->lock($entity, $lockMode, $lockVersion);
     }
 

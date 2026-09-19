@@ -29,7 +29,8 @@
     },
     "minimum-stability": "dev",
     "require": {
-        "doctrine/orm": "*",
+        "php": ">=8.5",
+        "doctrine/orm": "^4.0",
         "symfony/cache": "8.1.x"
     },
     "suggest": {
