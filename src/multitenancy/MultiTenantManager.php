@@ -5,14 +5,22 @@ declare(strict_types=1);
 namespace dev\winterframework\doctrine\multitenancy;
 
 use dev\winterframework\core\context\ApplicationContext;
+use dev\winterframework\coroutine\CoroutineScopeProvider;
+use dev\winterframework\coroutine\CoroutineScopeProviders;
+use dev\winterframework\coroutine\CoroutineScopedPool;
+use dev\winterframework\doctrine\common\OrmConfigurationFactory;
+use dev\winterframework\coroutine\SwooleCoroutineScopeProvider;
+use dev\winterframework\doctrine\dbal\WinterConnection;
+use dev\winterframework\doctrine\orm\WinterEntityManager;
 use dev\winterframework\exception\BeansDependencyException;
 use dev\winterframework\pdbc\datasource\DataSourceConfig;
 use dev\winterframework\pdbc\multitenant\TenantDataSourceProvider;
+use Doctrine\Common\EventManager;
 use Doctrine\DBAL\Connection;
+use Doctrine\ORM\Configuration;
 use Doctrine\ORM\EntityManager;
-use Symfony\Component\Cache\Adapter\ArrayAdapter;
-use Doctrine\ORM\ORMSetup;
 use Doctrine\DBAL\DriverManager;
+use Throwable;
 
 /**
  * Manager for multi-tenant Doctrine access.
@@ -73,10 +81,87 @@ class MultiTenantManager {
 
     private ?TenantDataSourceProvider $tenantDataSourceProvider = null;
 
+    /**
+     * @var array<string, CoroutineScopedPool>
+     */
+    private array $emPools = [];
+
+    /**
+     * @var array<string, CoroutineScopedPool>
+     */
+    private array $connPools = [];
+
+    /**
+     * @var array<string, Configuration>
+     */
+    private array $ormConfigs = [];
+
+    /**
+     * @var array<string, EventManager>
+     */
+    private array $sharedEventManagers = [];
+
+    private CoroutineScopeProvider $scopes;
+    private bool $coroutineScoped;
+    private int $maxDelegates = 50;
+    private int $maxWaitMs = 5000;
+
+    /**
+     * Shipped pool defaults. A tenant config still carrying these values
+     * is treated as "no per-tenant override" and the global caps apply:
+     * Track A's getters are non-nullable, so an untouched config cannot
+     * be told apart from one explicitly set to the defaults, and that
+     * edge collapses toward the global, which is the safe direction.
+     */
+    private const SHIPPED_DEFAULT_MAX_DELEGATES = 50;
+    private const SHIPPED_DEFAULT_MAX_WAIT_MS = 5000;
+
     public function __construct(
         private string $providerClassName,
-        private ApplicationContext $appCtx
+        private ApplicationContext $appCtx,
+        ?CoroutineScopeProvider $scopes = null,
+        ?bool $coroutineScoped = null,
+        int $maxDelegates = 50,
+        int $maxWaitMs = 5000
     ) {
+        $this->scopes = $scopes ?? CoroutineScopeProviders::shared();
+        $this->coroutineScoped = $coroutineScoped ?? SwooleCoroutineScopeProvider::isAvailable();
+        $this->maxDelegates = max(0, $maxDelegates);
+        $this->maxWaitMs = max(0, $maxWaitMs);
+    }
+
+    public function isCoroutineScoped(): bool {
+        return $this->coroutineScoped;
+    }
+
+    public function setCoroutineScoped(bool $coroutineScoped): void {
+        $this->coroutineScoped = $coroutineScoped;
+    }
+
+    /**
+     * Pool caps for one tenant: the per-datasource `connection.*`
+     * overrides win (read off the tenant config's Track A getters when
+     * winter-boot exposes them), then the global caps, then the shipped
+     * defaults (50 connections, 5000ms wait).
+     *
+     * @return array{0: int, 1: int} [maxDelegates, maxWaitMs]
+     */
+    private function resolvePoolCaps(DataSourceConfig $config): array {
+        $max = $this->maxDelegates;
+        if (method_exists($config, 'getMaxConnections')) {
+            $perDs = (int)$config->getMaxConnections();
+            if ($perDs !== self::SHIPPED_DEFAULT_MAX_DELEGATES) {
+                $max = $perDs;
+            }
+        }
+        $wait = $this->maxWaitMs;
+        if (method_exists($config, 'getMaxWaitMs')) {
+            $perDs = (int)$config->getMaxWaitMs();
+            if ($perDs !== self::SHIPPED_DEFAULT_MAX_WAIT_MS) {
+                $wait = $perDs;
+            }
+        }
+        return [max(0, $max), max(0, $wait)];
     }
 
     /**
@@ -104,6 +189,9 @@ class MultiTenantManager {
      * @return EntityManager
      */
     public function getEntityManager(string $tenantId): EntityManager {
+        if ($this->coroutineScoped) {
+            return $this->getScopedEntityManager($tenantId);
+        }
         if (!isset($this->entityManagers[$tenantId])) {
             $config = $this->getTenantConfig($tenantId);
             $this->entityManagers[$tenantId] = $this->buildEntityManager($config, $tenantId);
@@ -119,6 +207,9 @@ class MultiTenantManager {
      * @return Connection
      */
     public function getConnection(string $tenantId): Connection {
+        if ($this->coroutineScoped) {
+            return $this->getScopedConnection($tenantId);
+        }
         if (!isset($this->connections[$tenantId])) {
             $config = $this->getTenantConfig($tenantId);
             $this->connections[$tenantId] = $this->buildConnection($config, $tenantId);
@@ -172,6 +263,139 @@ class MultiTenantManager {
         return $this->tenantConfigs[$tenantId];
     }
 
+    /**
+     * Coroutine-scoped façade per tenant (stable return identity; delegates
+     * are keyed by tenant + coroutine scope).
+     */
+    private function getScopedEntityManager(string $tenantId): WinterEntityManager {
+        $facade = $this->entityManagers[$tenantId] ?? null;
+        if ($facade instanceof WinterEntityManager) {
+            return $facade;
+        }
+        if (!isset($this->emPools[$tenantId])) {
+            [$maxDelegates, $maxWaitMs] = $this->resolvePoolCaps($this->getTenantConfig($tenantId));
+            $this->emPools[$tenantId] = new CoroutineScopedPool(
+                fn() => $this->buildDelegateEntityManager($tenantId),
+                $this->scopes,
+                function (EntityManager $em): void {
+                    $this->destroyDelegateEntityManager($em);
+                },
+                fn(EntityManager $em) => $em->isOpen(),
+                null,
+                $tenantId . '-em',
+                $maxDelegates,
+                $maxWaitMs
+            );
+        }
+        $facade = WinterEntityManager::create($this->emPools[$tenantId]);
+        $this->entityManagers[$tenantId] = $facade;
+        return $facade;
+    }
+
+    private function getScopedConnection(string $tenantId): WinterConnection {
+        $facade = $this->connections[$tenantId] ?? null;
+        if ($facade instanceof WinterConnection) {
+            return $facade;
+        }
+        if (!isset($this->connPools[$tenantId])) {
+            [$maxDelegates, $maxWaitMs] = $this->resolvePoolCaps($this->getTenantConfig($tenantId));
+            $this->connPools[$tenantId] = new CoroutineScopedPool(
+                fn() => $this->buildDelegateConnection($tenantId),
+                $this->scopes,
+                function (Connection $conn): void {
+                    $this->destroyDelegateConnection($conn);
+                },
+                null,
+                null,
+                $tenantId . '-dbal',
+                $maxDelegates,
+                $maxWaitMs
+            );
+        }
+        $facade = WinterConnection::create($this->connPools[$tenantId]);
+        $this->connections[$tenantId] = $facade;
+        return $facade;
+    }
+
+    private function getTenantOrmConfiguration(string $tenantId): Configuration {
+        if (!isset($this->ormConfigs[$tenantId])) {
+            $this->ormConfigs[$tenantId] = OrmConfigurationFactory::create([], false);
+        }
+        return $this->ormConfigs[$tenantId];
+    }
+
+    private function getTenantEventManager(string $tenantId): EventManager {
+        if (!isset($this->sharedEventManagers[$tenantId])) {
+            $this->sharedEventManagers[$tenantId] = new EventManager();
+        }
+        return $this->sharedEventManagers[$tenantId];
+    }
+
+    private function tenantDbParams(DataSourceConfig $config): array {
+        $dbParams = ['url' => $config->getUrl()];
+        if ($config->getUsername()) {
+            $dbParams['user'] = $config->getUsername();
+        }
+        if ($config->getPassword()) {
+            $dbParams['password'] = $config->getPassword();
+        }
+        return $dbParams;
+    }
+
+    private function buildDelegateConnection(string $tenantId): Connection {
+        $config = $this->getTenantConfig($tenantId);
+        return DriverManager::getConnection(
+            $this->tenantDbParams($config),
+            $this->getTenantOrmConfiguration($tenantId)
+        );
+    }
+
+    private function buildDelegateEntityManager(string $tenantId): EntityManager {
+        return new EntityManager(
+            $this->buildDelegateConnection($tenantId),
+            $this->getTenantOrmConfiguration($tenantId),
+            $this->getTenantEventManager($tenantId)
+        );
+    }
+
+    private function destroyDelegateEntityManager(EntityManager $em): void {
+        try {
+            if ($em->getConnection()->isTransactionActive()) {
+                try {
+                    $em->getConnection()->rollBack();
+                } catch (Throwable) {
+                }
+            }
+        } catch (Throwable) {
+        }
+        try {
+            if ($em->isOpen()) {
+                $em->close();
+            }
+        } catch (Throwable) {
+        }
+        try {
+            $em->getConnection()->close();
+        } catch (Throwable) {
+        }
+    }
+
+    private function destroyDelegateConnection(Connection $conn): void {
+        try {
+            if ($conn->isTransactionActive()) {
+                try {
+                    $conn->rollBack();
+                } catch (Throwable) {
+                }
+            }
+        } catch (Throwable) {
+        }
+        try {
+            $conn->close();
+        } catch (Throwable) {
+        }
+    }
+
     private function buildConnection(DataSourceConfig $config, string $tenantId): Connection {
         $url = $config->getUrl();
         $user = $config->getUsername();
@@ -207,13 +431,7 @@ class MultiTenantManager {
             $dbParams['password'] = $password;
         }
         
-        $configObj = ORMSetup::createAttributeMetadataConfiguration(
-            [],
-            false,
-            null,
-            new ArrayAdapter(),
-            false
-        );
+        $configObj = OrmConfigurationFactory::create([], false);
         
         return new EntityManager($this->buildConnection($config, $tenantId), $configObj);
     }
@@ -222,14 +440,30 @@ class MultiTenantManager {
      * Close all cached connections and entity managers.
      */
     public function close(): void {
+        foreach ($this->emPools as $pool) {
+            $pool->closeAll();
+        }
+        foreach ($this->connPools as $pool) {
+            $pool->closeAll();
+        }
         foreach ($this->entityManagers as $em) {
-            $em->close();
+            try {
+                $em->close();
+            } catch (Throwable) {
+            }
         }
         foreach ($this->connections as $conn) {
-            $conn->close();
+            try {
+                $conn->close();
+            } catch (Throwable) {
+            }
         }
         $this->entityManagers = [];
         $this->connections = [];
+        $this->emPools = [];
+        $this->connPools = [];
+        $this->ormConfigs = [];
+        $this->sharedEventManagers = [];
         $this->emTransactionManagers = [];
         $this->dbalTransactionManagers = [];
         $this->tenantConfigs = [];
@@ -241,18 +475,34 @@ class MultiTenantManager {
      * @param string $tenantId
      */
     public function evictTenant(string $tenantId): void {
+        if (isset($this->emPools[$tenantId])) {
+            $this->emPools[$tenantId]->closeAll();
+            unset($this->emPools[$tenantId]);
+        }
+        if (isset($this->connPools[$tenantId])) {
+            $this->connPools[$tenantId]->closeAll();
+            unset($this->connPools[$tenantId]);
+        }
         if (isset($this->entityManagers[$tenantId])) {
-            $this->entityManagers[$tenantId]->close();
+            try {
+                $this->entityManagers[$tenantId]->close();
+            } catch (Throwable) {
+            }
             unset($this->entityManagers[$tenantId]);
         }
         if (isset($this->connections[$tenantId])) {
-            $this->connections[$tenantId]->close();
+            try {
+                $this->connections[$tenantId]->close();
+            } catch (Throwable) {
+            }
             unset($this->connections[$tenantId]);
         }
         unset(
             $this->emTransactionManagers[$tenantId],
             $this->dbalTransactionManagers[$tenantId],
-            $this->tenantConfigs[$tenantId]
+            $this->tenantConfigs[$tenantId],
+            $this->ormConfigs[$tenantId],
+            $this->sharedEventManagers[$tenantId]
         );
     }
 

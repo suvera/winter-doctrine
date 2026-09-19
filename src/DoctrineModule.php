@@ -10,6 +10,7 @@ use dev\winterframework\core\context\ApplicationContext;
 use dev\winterframework\core\context\ApplicationContextData;
 use dev\winterframework\core\context\WinterBeanProviderContext;
 use dev\winterframework\doctrine\common\DoctrineComponentBuilder;
+use dev\winterframework\coroutine\SwooleCoroutineScopeProvider;
 use dev\winterframework\doctrine\dbal\DbalTransactionManager;
 use dev\winterframework\doctrine\multitenancy\MultiTenantManager;
 use dev\winterframework\doctrine\orm\EmTransactionManager;
@@ -24,6 +25,7 @@ use Doctrine\DBAL\Types\Type;
 use Doctrine\DBAL\Types\Types;
 use dev\winterframework\doctrine\common\TolerantDateTimeTzImmutableType;
 use Override;
+use Throwable;
 
 #[Module]
 class DoctrineModule  implements WinterModule {
@@ -37,6 +39,39 @@ class DoctrineModule  implements WinterModule {
     public function begin(ApplicationContext $ctx, ApplicationContextData $ctxData): void {
         $this->registerMultiTenantDataSources($ctx, $ctxData);
         $this->registerStandardDataSources($ctx, $ctxData);
+    }
+
+    private function resolveCoroutineScoping(ApplicationContextData $ctxData): bool {
+        try {
+            $props = $ctxData->getPropertyContext();
+            if ($props->has(DoctrineComponentBuilder::COROUTINE_SCOPED_FLAG)) {
+                return (bool)filter_var(
+                    $props->get(DoctrineComponentBuilder::COROUTINE_SCOPED_FLAG),
+                    FILTER_VALIDATE_BOOLEAN
+                );
+            }
+        } catch (Throwable) {
+        }
+        return SwooleCoroutineScopeProvider::isAvailable();
+    }
+
+    /**
+     * @return array{0: int, 1: int} [maxDelegates, maxWaitMs]
+     */
+    private function resolveCoroutineCaps(ApplicationContextData $ctxData): array {
+        $max = 50;
+        $wait = 5000;
+        try {
+            $props = $ctxData->getPropertyContext();
+            if ($props->has(DoctrineComponentBuilder::COROUTINE_MAX_DELEGATES_FLAG)) {
+                $max = max(0, (int)$props->get(DoctrineComponentBuilder::COROUTINE_MAX_DELEGATES_FLAG));
+            }
+            if ($props->has(DoctrineComponentBuilder::COROUTINE_MAX_WAIT_MS_FLAG)) {
+                $wait = max(0, (int)$props->get(DoctrineComponentBuilder::COROUTINE_MAX_WAIT_MS_FLAG));
+            }
+        } catch (Throwable) {
+        }
+        return [$max, $wait];
     }
 
     private function registerMultiTenantDataSources(ApplicationContext $ctx, ApplicationContextData $ctxData): void {
@@ -76,7 +111,15 @@ class DoctrineModule  implements WinterModule {
             $providerClass = $mtDs['providerClass'];
             $beanProvider = $ctxData->getBeanProvider();
 
-            $mtManager = new MultiTenantManager($providerClass, $ctx);
+            [$maxDelegates, $maxWaitMs] = $this->resolveCoroutineCaps($ctxData);
+            $mtManager = new MultiTenantManager(
+                $providerClass,
+                $ctx,
+                null,
+                $this->resolveCoroutineScoping($ctxData),
+                $maxDelegates,
+                $maxWaitMs
+            );
             $beanProvider->registerInternalBean(
                 $mtManager,
                 MultiTenantManager::class,

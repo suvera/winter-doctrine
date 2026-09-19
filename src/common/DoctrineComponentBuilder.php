@@ -14,12 +14,18 @@ use dev\winterframework\type\TypeAssert;
 use dev\winterframework\util\log\Wlf4p;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\EntityManager;
-use Doctrine\ORM\ORMSetup;
 use dev\winterframework\doctrine\dbal\DbalTransactionManager;
+use dev\winterframework\doctrine\dbal\WinterConnection;
+use dev\winterframework\coroutine\CoroutineScopeProvider;
+use dev\winterframework\coroutine\CoroutineScopeProviders;
+use dev\winterframework\coroutine\CoroutineScopedPool;
+use dev\winterframework\coroutine\SwooleCoroutineScopeProvider;
 use dev\winterframework\doctrine\orm\EmTransactionManager;
+use dev\winterframework\doctrine\orm\WinterEntityManager;
+use Doctrine\Common\EventManager;
 use Doctrine\DBAL\Connection;
+use Doctrine\ORM\Configuration;
 use ReflectionClass;
-use Symfony\Component\Cache\Adapter\ArrayAdapter;
 use Throwable;
 use WeakMap;
 
@@ -69,6 +75,51 @@ class DoctrineComponentBuilder {
     private WeakMap $dsObjectMap;
     private WeakMap $dsConnectMap;
 
+    /**
+     * Kill switch / opt-in flag (application.yml):
+     * `winter.coroutine.db.enabled`. Defaults to on under Swoole,
+     * off without it.
+     */
+    const COROUTINE_SCOPED_FLAG = 'winter.coroutine.db.enabled';
+
+    /**
+     * Cap on concurrent scoped DB connections per pool (shipped as 50,
+     * 0 = unlimited but not recommended).
+     * application.yml: `winter.coroutine.db.maxConnections`.
+     */
+    const COROUTINE_MAX_DELEGATES_FLAG = 'winter.coroutine.db.maxConnections';
+
+    /**
+     * How long a new scope waits for a free DB connection before giving up.
+     * application.yml: `winter.coroutine.db.maxWaitMs` (default 5000).
+     */
+    const COROUTINE_MAX_WAIT_MS_FLAG = 'winter.coroutine.db.maxWaitMs';
+
+    private bool $coroutineScoped = false;
+    private int $maxDelegates = 50;
+    private int $maxWaitMs = 5000;
+    private CoroutineScopeProvider $scopes;
+
+    /**
+     * @var CoroutineScopedPool[]
+     */
+    private array $emPools = [];
+
+    /**
+     * @var CoroutineScopedPool[]
+     */
+    private array $connPools = [];
+
+    /**
+     * @var Configuration[]
+     */
+    private array $ormConfigs = [];
+
+    /**
+     * @var EventManager[]
+     */
+    private array $sharedEventManagers = [];
+
     public function __construct(
         private ApplicationContext $ctx,
         private ApplicationContextData $ctxData,
@@ -76,7 +127,72 @@ class DoctrineComponentBuilder {
     ) {
         $this->dsObjectMap = new WeakMap();
         $this->dsConnectMap = new WeakMap();
+        $this->scopes = CoroutineScopeProviders::create();
+        [$this->maxDelegates, $this->maxWaitMs] = $this->resolveCoroutineCaps();
         $this->init($dataSources);
+        $this->coroutineScoped = $this->resolveCoroutineScoping();
+    }
+
+    public function getMaxDelegates(): int {
+        return $this->maxDelegates;
+    }
+
+    public function getMaxWaitMs(): int {
+        return $this->maxWaitMs;
+    }
+
+    public function isCoroutineScoped(): bool {
+        return $this->coroutineScoped;
+    }
+
+    private function resolveCoroutineScoping(): bool {
+        try {
+            $props = $this->ctxData->getPropertyContext();
+            if ($props->has(self::COROUTINE_SCOPED_FLAG)) {
+                return (bool)filter_var(
+                    $props->get(self::COROUTINE_SCOPED_FLAG),
+                    FILTER_VALIDATE_BOOLEAN
+                );
+            }
+        } catch (Throwable $e) {
+            self::logException($e, 'Could not read ' . self::COROUTINE_SCOPED_FLAG);
+        }
+        return SwooleCoroutineScopeProvider::isAvailable();
+    }
+
+    /**
+     * Pool caps for one datasource, read off the per-datasource
+     * `connection.*` getters. Resolution order is per-datasource
+     * `connection.*` override, then the global keys, then the shipped
+     * defaults (50 connections, 5000ms wait): init() seeds each fresh
+     * config with the resolved globals before mapping, so an explicitly
+     * configured per-datasource value overwrites the global while an
+     * absent one inherits it.
+     *
+     * @return array{0: int, 1: int} [maxDelegates, maxWaitMs]
+     */
+    private function resolvePoolCaps(DoctrineDbConfig $ds): array {
+        return [max(0, $ds->getMaxConnections()), max(0, $ds->getMaxWaitMs())];
+    }
+
+    /**
+     * @return array{0: int, 1: int} [maxDelegates, maxWaitMs]
+     */
+    private function resolveCoroutineCaps(): array {
+        $max = 50;
+        $wait = 5000;
+        try {
+            $props = $this->ctxData->getPropertyContext();
+            if ($props->has(self::COROUTINE_MAX_DELEGATES_FLAG)) {
+                $max = max(0, (int)$props->get(self::COROUTINE_MAX_DELEGATES_FLAG));
+            }
+            if ($props->has(self::COROUTINE_MAX_WAIT_MS_FLAG)) {
+                $wait = max(0, (int)$props->get(self::COROUTINE_MAX_WAIT_MS_FLAG));
+            }
+        } catch (Throwable $e) {
+            self::logException($e, 'Could not read coroutine pool caps, using unlimited');
+        }
+        return [$max, $wait];
     }
 
     private function init(array $dataSources): void {
@@ -100,6 +216,12 @@ class DoctrineComponentBuilder {
             );
 
             $ds = new DoctrineDbConfig();
+            // Seed the per-datasource caps with the resolved globals, so
+            // the order holds: an explicit connection.* override mapped
+            // below wins, otherwise the global key (or the shipped
+            // 50/5000 default) applies.
+            $ds->setMaxConnections($this->maxDelegates);
+            $ds->setMaxWaitMs($this->maxWaitMs);
             try {
                 ObjectCreator::mapObject($ds, $dataSource, $ref);
             } catch (Throwable $e) {
@@ -246,6 +368,9 @@ class DoctrineComponentBuilder {
     }
 
     public function getPrimaryConnection(): Connection {
+        if ($this->coroutineScoped) {
+            return $this->getConnection($this->getPrimaryDsName());
+        }
         if (!isset($this->primaryConnection)) {
             foreach ($this->dsConfig as $dsConfig) {
                 if ($dsConfig->isPrimary()) {
@@ -262,6 +387,10 @@ class DoctrineComponentBuilder {
             $name = implode('-', explode('-', $name, -1));
         }
 
+        if ($this->coroutineScoped && isset($this->dsConfig[$name])) {
+            return $this->getScopedConnection($name);
+        }
+
         if (isset($this->connections[$name])) {
             return $this->connections[$name];
         } else if (isset($this->dsConfig[$name])) {
@@ -271,6 +400,9 @@ class DoctrineComponentBuilder {
     }
 
     public function getPrimaryEntityManager(): EntityManager {
+        if ($this->coroutineScoped) {
+            return $this->getEntityManager($this->getPrimaryDsName());
+        }
         if (!isset($this->primaryEntityManager)) {
             foreach ($this->dsConfig as $dsConfig) {
                 if ($dsConfig->isPrimary()) {
@@ -288,12 +420,180 @@ class DoctrineComponentBuilder {
         if ('-' . $parts[count($parts) - 1] == self::DOCTRINE_EM_SUFFIX) {
             $name = implode('-', explode('-', $name, -1));
         }
+        if ($this->coroutineScoped && isset($this->dsConfig[$name])) {
+            return $this->getScopedEntityManager($name);
+        }
         if (isset($this->entityManagers[$name])) {
             return $this->entityManagers[$name];
         } else if (isset($this->dsConfig[$name])) {
             return $this->entityManagers[$name] = $this->buildEntityManager($this->dsConfig[$name]);
         }
         throw new WinterException('Could not find EntityManager with name "' . $name . '"');
+    }
+
+    private function getPrimaryDsName(): string {
+        foreach ($this->dsConfig as $dsConfig) {
+            if ($dsConfig->isPrimary()) {
+                return $dsConfig->getName();
+            }
+        }
+        throw new WinterException('Could not find Primary EntityManager');
+    }
+
+    /**
+     * Coroutine-scoped façade (stable bean identity; delegates are per-scope).
+     */
+    private function getScopedEntityManager(string $name): WinterEntityManager {
+        $facade = $this->entityManagers[$name] ?? null;
+        if ($facade instanceof WinterEntityManager) {
+            return $facade;
+        }
+        $ds = $this->dsConfig[$name];
+        $pool = $this->emPools[$name] ?? null;
+        if ($pool === null) {
+            [$maxDelegates, $maxWaitMs] = $this->resolvePoolCaps($ds);
+            $pool = new CoroutineScopedPool(
+                fn() => $this->buildDelegateEntityManager($ds),
+                $this->scopes,
+                function (EntityManager $em): void {
+                    $this->destroyDelegateEntityManager($em);
+                },
+                fn(EntityManager $em) => $em->isOpen(),
+                null,
+                $name . '-em',
+                $maxDelegates,
+                $maxWaitMs
+            );
+            $this->emPools[$name] = $pool;
+        }
+        $facade = WinterEntityManager::create($pool);
+        $this->entityManagers[$name] = $facade;
+        return $facade;
+    }
+
+    /**
+     * Coroutine-scoped Connection façade (stable bean identity).
+     */
+    private function getScopedConnection(string $name): Connection {
+        $facade = $this->connections[$name] ?? null;
+        if ($facade instanceof WinterConnection) {
+            return $facade;
+        }
+        $ds = $this->dsConfig[$name];
+        $pool = $this->connPools[$name] ?? null;
+        if ($pool === null) {
+            [$maxDelegates, $maxWaitMs] = $this->resolvePoolCaps($ds);
+            $pool = new CoroutineScopedPool(
+                fn() => $this->buildFreshConnection($ds),
+                $this->scopes,
+                function (Connection $conn): void {
+                    $this->destroyDelegateConnection($conn);
+                },
+                null,
+                null,
+                $name . '-dbal',
+                $maxDelegates,
+                $maxWaitMs
+            );
+            $this->connPools[$name] = $pool;
+        }
+        $facade = WinterConnection::create($pool);
+        $this->connections[$name] = $facade;
+        return $facade;
+    }
+
+    private function getSharedEventManager(DoctrineDbConfig $ds): EventManager {
+        $name = $ds->getName();
+        if (!isset($this->sharedEventManagers[$name])) {
+            $this->sharedEventManagers[$name] = new EventManager();
+        }
+        return $this->sharedEventManagers[$name];
+    }
+
+    private function getOrmConfiguration(DoctrineDbConfig $ds): Configuration {
+        $name = $ds->getName();
+        if (!isset($this->ormConfigs[$name])) {
+            $this->ormConfigs[$name] = OrmConfigurationFactory::create(
+                $ds->getEntityPaths(),
+                $ds->isDevMode()
+            );
+        }
+        return $this->ormConfigs[$name];
+    }
+
+    /**
+     * Build a virgin delegate: shared metadata config + shared event
+     * manager, but its OWN DBAL connection (separate PDO per coroutine is
+     * non-negotiable — sharing merges DB transactions across coroutines).
+     */
+    private function buildDelegateEntityManager(DoctrineDbConfig $ds): EntityManager {
+        return new EntityManager(
+            $this->buildFreshConnection($ds),
+            $this->getOrmConfiguration($ds),
+            $this->getSharedEventManager($ds)
+        );
+    }
+
+    private function destroyDelegateEntityManager(EntityManager $em): void {
+        try {
+            $conn = $em->getConnection();
+            if ($conn->isTransactionActive()) {
+                try {
+                    $conn->rollBack();
+                } catch (Throwable $e) {
+                    self::logException($e, 'Rollback of leftover transaction failed');
+                }
+            }
+        } catch (Throwable) {
+            // Fall through to close attempts.
+        }
+        try {
+            if ($em->isOpen()) {
+                $em->close();
+            }
+        } catch (Throwable $e) {
+            self::logException($e, 'Delegate EntityManager close failed');
+        }
+        try {
+            $em->getConnection()->close();
+        } catch (Throwable $e) {
+            self::logException($e, 'Delegate Connection close failed');
+        }
+    }
+
+    private function destroyDelegateConnection(Connection $conn): void {
+        try {
+            if ($conn->isTransactionActive()) {
+                try {
+                    $conn->rollBack();
+                } catch (Throwable $e) {
+                    self::logException($e, 'Rollback of leftover transaction failed');
+                }
+            }
+        } catch (Throwable) {
+            // Fall through to close.
+        }
+        try {
+            $conn->close();
+        } catch (Throwable $e) {
+            self::logException($e, 'Delegate Connection close failed');
+        }
+    }
+
+    /**
+     * Observability for operations: active delegate counts per pool.
+     *
+     * @return array<string, int> pool name => active delegate count
+     */
+    public function getActiveDelegateCounts(): array {
+        $out = [];
+        foreach ($this->emPools as $name => $pool) {
+            $out[$name . '-em'] = $pool->getActiveDelegateCount();
+        }
+        foreach ($this->connPools as $name => $pool) {
+            $out[$name . '-dbal'] = $pool->getActiveDelegateCount();
+        }
+        return $out;
     }
 
     /**
@@ -308,17 +608,10 @@ class DoctrineComponentBuilder {
             return $this->dsObjectMap[$ds];
         }
 
-        $config = ORMSetup::createAttributeMetadataConfiguration(
+        $config = OrmConfigurationFactory::create(
             $ds->getEntityPaths(),
-            $ds->isDevMode(),
-            null,
-            new ArrayAdapter(),
-            false
+            $ds->isDevMode()
         );
-
-        if (PHP_VERSION_ID >= 80400) {
-            $config->enableNativeLazyObjects(true);
-        }
 
         $obj = new EntityManager($this->buildConnection($ds), $config);
 
@@ -332,24 +625,42 @@ class DoctrineComponentBuilder {
             return $this->dsConnectMap[$ds];
         }
 
-        $dbParams = $this->dsParams[$ds->getName()];
-        $config = ORMSetup::createAttributeMetadataConfiguration(
-            $ds->getEntityPaths(),
-            $ds->isDevMode(),
-            null,
-            new ArrayAdapter(),
-            false
-        );
-
-        $connection = DriverManager::getConnection($dbParams, $config);
+        $connection = $this->buildFreshConnection($ds);
         $this->dsConnectMap[$ds] = $connection;
 
         /** @var IdleCheckRegistry $idleCheck */
         $idleCheck = $this->ctx->beanByClass(IdleCheckRegistry::class);
         $idleCheck->register(function () use ($connection) {
-            // TODO: Implement idle check
+            try {
+                if (!$connection->isConnected()) {
+                    return;
+                }
+                $connection->executeQuery($connection->getDatabasePlatform()->getDummySelectSQL());
+            } catch (Throwable $e) {
+                self::logException($e, 'Doctrine idle connection check failed');
+                try {
+                    $connection->close();
+                } catch (Throwable $ignored) {
+                }
+            }
+        });
+
+        $idleCheck->register(function () {
+            $counts = $this->getActiveDelegateCounts();
+            if (!empty($counts)) {
+                self::logDebug('Doctrine open DB connections: ' . json_encode($counts));
+            }
         });
 
         return $connection;
+    }
+
+    /**
+     * Always builds a brand-new connection (own PDO). Used for every
+     * coroutine delegate; never memoized.
+     */
+    private function buildFreshConnection(DoctrineDbConfig $ds): Connection {
+        $dbParams = $this->dsParams[$ds->getName()];
+        return DriverManager::getConnection($dbParams, $this->getOrmConfiguration($ds));
     }
 }
