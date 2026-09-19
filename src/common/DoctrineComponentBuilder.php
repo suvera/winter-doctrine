@@ -14,7 +14,6 @@ use dev\winterframework\type\TypeAssert;
 use dev\winterframework\util\log\Wlf4p;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\EntityManager;
-use Doctrine\ORM\ORMSetup;
 use dev\winterframework\doctrine\dbal\DbalTransactionManager;
 use dev\winterframework\doctrine\dbal\WinterConnection;
 use dev\winterframework\doctrine\coroutine\CoroutineScopeProvider;
@@ -27,7 +26,6 @@ use Doctrine\Common\EventManager;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\Configuration;
 use ReflectionClass;
-use Symfony\Component\Cache\Adapter\ArrayAdapter;
 use Throwable;
 use WeakMap;
 
@@ -492,17 +490,10 @@ class DoctrineComponentBuilder {
     private function getOrmConfiguration(DoctrineDbConfig $ds): Configuration {
         $name = $ds->getName();
         if (!isset($this->ormConfigs[$name])) {
-            $config = ORMSetup::createAttributeMetadataConfig(
+            $this->ormConfigs[$name] = OrmConfigurationFactory::create(
                 $ds->getEntityPaths(),
-                $ds->isDevMode(),
-                null,
-                new ArrayAdapter()
+                $ds->isDevMode()
             );
-
-            if (PHP_VERSION_ID >= 80400) {
-                $config->enableNativeLazyObjects(true);
-            }
-            $this->ormConfigs[$name] = $config;
         }
         return $this->ormConfigs[$name];
     }
@@ -594,16 +585,10 @@ class DoctrineComponentBuilder {
             return $this->dsObjectMap[$ds];
         }
 
-        $config = ORMSetup::createAttributeMetadataConfig(
+        $config = OrmConfigurationFactory::create(
             $ds->getEntityPaths(),
-            $ds->isDevMode(),
-            null,
-            new ArrayAdapter()
+            $ds->isDevMode()
         );
-
-        if (PHP_VERSION_ID >= 80400) {
-            $config->enableNativeLazyObjects(true);
-        }
 
         $obj = new EntityManager($this->buildConnection($ds), $config);
 

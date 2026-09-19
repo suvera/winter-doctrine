@@ -8,6 +8,7 @@ use dev\winterframework\core\context\ApplicationContext;
 use dev\winterframework\doctrine\coroutine\CoroutineScopeProvider;
 use dev\winterframework\doctrine\coroutine\CoroutineScopeProviders;
 use dev\winterframework\doctrine\coroutine\CoroutineScopedPool;
+use dev\winterframework\doctrine\common\OrmConfigurationFactory;
 use dev\winterframework\doctrine\coroutine\SwooleCoroutineScopeProvider;
 use dev\winterframework\doctrine\dbal\WinterConnection;
 use dev\winterframework\doctrine\orm\WinterEntityManager;
@@ -18,8 +19,6 @@ use Doctrine\Common\EventManager;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\Configuration;
 use Doctrine\ORM\EntityManager;
-use Symfony\Component\Cache\Adapter\ArrayAdapter;
-use Doctrine\ORM\ORMSetup;
 use Doctrine\DBAL\DriverManager;
 use Throwable;
 
@@ -282,12 +281,7 @@ class MultiTenantManager {
 
     private function getTenantOrmConfiguration(string $tenantId): Configuration {
         if (!isset($this->ormConfigs[$tenantId])) {
-            $this->ormConfigs[$tenantId] = ORMSetup::createAttributeMetadataConfig(
-                [],
-                false,
-                null,
-                new ArrayAdapter()
-            );
+            $this->ormConfigs[$tenantId] = OrmConfigurationFactory::create([], false);
         }
         return $this->ormConfigs[$tenantId];
     }
@@ -399,12 +393,7 @@ class MultiTenantManager {
             $dbParams['password'] = $password;
         }
         
-        $configObj = ORMSetup::createAttributeMetadataConfig(
-            [],
-            false,
-            null,
-            new ArrayAdapter()
-        );
+        $configObj = OrmConfigurationFactory::create([], false);
         
         return new EntityManager($this->buildConnection($config, $tenantId), $configObj);
     }
