@@ -10,6 +10,7 @@ use dev\winterframework\core\context\ApplicationContext;
 use dev\winterframework\core\context\ApplicationContextData;
 use dev\winterframework\core\context\WinterBeanProviderContext;
 use dev\winterframework\doctrine\common\DoctrineComponentBuilder;
+use dev\winterframework\doctrine\common\DoctrineDbConfig;
 use dev\winterframework\coroutine\SwooleCoroutineScopeProvider;
 use dev\winterframework\doctrine\dbal\DbalTransactionManager;
 use dev\winterframework\doctrine\multitenancy\MultiTenantManager;
@@ -112,13 +113,21 @@ class DoctrineModule  implements WinterModule {
             $beanProvider = $ctxData->getBeanProvider();
 
             [$maxDelegates, $maxWaitMs] = $this->resolveCoroutineCaps($ctxData);
+            // Accept both nested (doctrine: {entityPaths: ...}) and
+            // flattened (doctrine.entityPaths) keys.
+            $doctrine = (new DoctrineDbConfig())->unFlatten($mtDs)['doctrine'] ?? [];
+            $entityPaths = is_array($doctrine) ? ($doctrine['entityPaths'] ?? []) : [];
+            $devMode = is_array($doctrine)
+                && filter_var($doctrine['isDevMode'] ?? false, FILTER_VALIDATE_BOOLEAN);
             $mtManager = new MultiTenantManager(
                 $providerClass,
                 $ctx,
                 null,
                 $this->resolveCoroutineScoping($ctxData),
                 $maxDelegates,
-                $maxWaitMs
+                $maxWaitMs,
+                is_array($entityPaths) ? array_values($entityPaths) : [$entityPaths],
+                $devMode
             );
             $beanProvider->registerInternalBean(
                 $mtManager,

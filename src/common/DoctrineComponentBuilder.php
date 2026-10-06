@@ -96,6 +96,7 @@ class DoctrineComponentBuilder {
     const COROUTINE_MAX_WAIT_MS_FLAG = 'winter.coroutine.db.maxWaitMs';
 
     private bool $coroutineScoped = false;
+    private bool $delegateCountLoggerRegistered = false;
     private int $maxDelegates = 50;
     private int $maxWaitMs = 5000;
     private CoroutineScopeProvider $scopes;
@@ -109,6 +110,16 @@ class DoctrineComponentBuilder {
      * @var CoroutineScopedPool[]
      */
     private array $connPools = [];
+
+    /**
+     * @var IsolatingScopeProvider[] scope providers of the EntityManager pools
+     */
+    private array $emIsolation = [];
+
+    /**
+     * @var IsolatingScopeProvider[] scope providers of the Connection pools
+     */
+    private array $connIsolation = [];
 
     /**
      * @var Configuration[]
@@ -190,7 +201,7 @@ class DoctrineComponentBuilder {
                 $wait = max(0, (int)$props->get(self::COROUTINE_MAX_WAIT_MS_FLAG));
             }
         } catch (Throwable $e) {
-            self::logException($e, 'Could not read coroutine pool caps, using unlimited');
+            self::logException($e, 'Could not read coroutine pool caps, using the defaults');
         }
         return [$max, $wait];
     }
@@ -205,13 +216,13 @@ class DoctrineComponentBuilder {
 
             TypeAssert::notEmpty(
                 'name',
-                $dataSource['name'],
+                $dataSource['name'] ?? null,
                 'EntityManager configured without "name" parameter'
             );
 
             TypeAssert::notEmpty(
                 'url',
-                $dataSource['url'],
+                $dataSource['url'] ?? null,
                 'EntityManager configured without "url" parameter'
             );
 
@@ -230,28 +241,27 @@ class DoctrineComponentBuilder {
             }
             $ds->setName($ds->getName() . self::DOCTRINE_SUFFIX);
 
-            $parsedParams = $this->parseDsn($ds->getUrl());
             $ds->parseDoctrineParams($dataSource);
-            foreach ($ds->getDoctrineOptions() as $key => $value) {
-                if (!is_null($value) && $value !== '' && (is_array($value) && count($value) > 0)) {
-                    $parsedParams[$key] = $value;
-                }
-            }
+            // DSN params, then explicit doctrine.* options (scalars included),
+            // then the configured username/password.
+            $parsedParams = DoctrineDsn::connectionParams(
+                $ds->getUrl(),
+                $ds->getUsername(),
+                $ds->getPassword(),
+                $ds->getDoctrineOptions()
+            );
 
-            if (!isset($parsedParams['driver']) || !$parsedParams['driver']) {
+            $driver = $parsedParams['driver'] ?? $parsedParams['driverClass'] ?? '';
+            if (!is_string($driver) || $driver === '') {
                 throw new WinterException('Malformed parameter "url". No driver found');
             }
-            $ds->setDriverClass($parsedParams['driver']);
+            $ds->setDriverClass($driver);
 
-            if (isset($parsedParams['user']) && $parsedParams['user']) {
-                $ds->setUsername($parsedParams['user']);
-            } else {
-                $parsedParams['user'] = $ds->getUsername();
+            if ($ds->getUsername() === '' && isset($parsedParams['user'])) {
+                $ds->setUsername((string)$parsedParams['user']);
             }
-            if (isset($parsedParams['password']) && $parsedParams['password']) {
-                $ds->setPassword($parsedParams['password']);
-            } else {
-                $parsedParams['password'] = $ds->getPassword();
+            if ($ds->getPassword() === '' && isset($parsedParams['password'])) {
+                $ds->setPassword((string)$parsedParams['password']);
             }
 
             if ($primary && $ds->isPrimary()) {
@@ -282,28 +292,7 @@ class DoctrineComponentBuilder {
      * Parse the DSN string and return the array of key-value pairs
      */
     protected function parseDsn(string $url): array {
-        $config = [];
-        $parts = explode(":", $url, 2);
-        $config['driver'] = $parts[0];
-
-        if ($config['driver'] === 'sqlite') {
-            $config['driver'] = 'sqlite3';
-            $config['path'] = $parts[1];
-            return $config;
-        }
-
-        if (!isset($parts[1])) {
-            return $config;
-        }
-        $keyValues = explode(";", $parts[1]);
-        foreach ($keyValues as $keyValue) {
-            $kv = explode("=", $keyValue, 2);
-            if (isset($kv[1])) {
-                $config[$kv[0]] = $kv[1];
-            }
-        }
-
-        return $config;
+        return DoctrineDsn::toParams($url);
     }
 
     /**
@@ -315,13 +304,9 @@ class DoctrineComponentBuilder {
 
     public function getPrimaryTransactionManager(): EmTransactionManager {
         if (!isset($this->primaryTransactionManager)) {
-            foreach ($this->dsConfig as $dsConfig) {
-                if ($dsConfig->isPrimary()) {
-                    return $this->primaryTransactionManager = $this->getTransactionManager($dsConfig->getName());
-                }
-            }
+            $this->primaryTransactionManager = $this->getTransactionManager($this->getPrimaryDsName());
         }
-        throw new WinterException('Could not find Primary EmTransactionManager');
+        return $this->primaryTransactionManager;
     }
 
     public function getTransactionManager(string $name): EmTransactionManager {
@@ -342,13 +327,9 @@ class DoctrineComponentBuilder {
 
     public function getPrimaryDbalTransactionManager(): DbalTransactionManager {
         if (!isset($this->primaryDbalTransactionManager)) {
-            foreach ($this->dsConfig as $dsConfig) {
-                if ($dsConfig->isPrimary()) {
-                    return $this->primaryDbalTransactionManager = $this->getDbalTransactionManager($dsConfig->getName());
-                }
-            }
+            $this->primaryDbalTransactionManager = $this->getDbalTransactionManager($this->getPrimaryDsName());
         }
-        throw new WinterException('Could not find Primary DbalTransactionManager');
+        return $this->primaryDbalTransactionManager;
     }
 
     public function getDbalTransactionManager(string $name): DbalTransactionManager {
@@ -372,13 +353,9 @@ class DoctrineComponentBuilder {
             return $this->getConnection($this->getPrimaryDsName());
         }
         if (!isset($this->primaryConnection)) {
-            foreach ($this->dsConfig as $dsConfig) {
-                if ($dsConfig->isPrimary()) {
-                    return $this->primaryConnection = $this->getConnection($dsConfig->getName());
-                }
-            }
+            $this->primaryConnection = $this->getConnection($this->getPrimaryDsName());
         }
-        throw new WinterException('Could not find Primary EmTransactionManager');
+        return $this->primaryConnection;
     }
 
     public function getConnection(string $name): Connection {
@@ -404,13 +381,7 @@ class DoctrineComponentBuilder {
             return $this->getEntityManager($this->getPrimaryDsName());
         }
         if (!isset($this->primaryEntityManager)) {
-            foreach ($this->dsConfig as $dsConfig) {
-                if ($dsConfig->isPrimary()) {
-                    $this->primaryEntityManager = $this->buildEntityManager($dsConfig);
-                    return $this->primaryEntityManager;
-                }
-            }
-            throw new WinterException('Could not find Primary EntityManager');
+            $this->primaryEntityManager = $this->getEntityManager($this->getPrimaryDsName());
         }
         return $this->primaryEntityManager;
     }
@@ -452,9 +423,10 @@ class DoctrineComponentBuilder {
         $pool = $this->emPools[$name] ?? null;
         if ($pool === null) {
             [$maxDelegates, $maxWaitMs] = $this->resolvePoolCaps($ds);
+            $this->emIsolation[$name] = new IsolatingScopeProvider($this->scopes);
             $pool = new CoroutineScopedPool(
                 fn() => $this->buildDelegateEntityManager($ds),
-                $this->scopes,
+                $this->emIsolation[$name],
                 function (EntityManager $em): void {
                     $this->destroyDelegateEntityManager($em);
                 },
@@ -466,7 +438,7 @@ class DoctrineComponentBuilder {
             );
             $this->emPools[$name] = $pool;
         }
-        $facade = WinterEntityManager::create($pool);
+        $facade = WinterEntityManager::create($pool, $this->emIsolation[$name]);
         $this->entityManagers[$name] = $facade;
         return $facade;
     }
@@ -483,9 +455,10 @@ class DoctrineComponentBuilder {
         $pool = $this->connPools[$name] ?? null;
         if ($pool === null) {
             [$maxDelegates, $maxWaitMs] = $this->resolvePoolCaps($ds);
+            $this->connIsolation[$name] = new IsolatingScopeProvider($this->scopes);
             $pool = new CoroutineScopedPool(
                 fn() => $this->buildFreshConnection($ds),
-                $this->scopes,
+                $this->connIsolation[$name],
                 function (Connection $conn): void {
                     $this->destroyDelegateConnection($conn);
                 },
@@ -497,7 +470,7 @@ class DoctrineComponentBuilder {
             );
             $this->connPools[$name] = $pool;
         }
-        $facade = WinterConnection::create($pool);
+        $facade = WinterConnection::create($pool, $this->connIsolation[$name]);
         $this->connections[$name] = $facade;
         return $facade;
     }
@@ -645,12 +618,15 @@ class DoctrineComponentBuilder {
             }
         });
 
-        $idleCheck->register(function () {
-            $counts = $this->getActiveDelegateCounts();
-            if (!empty($counts)) {
-                self::logDebug('Doctrine open DB connections: ' . json_encode($counts));
-            }
-        });
+        if (!$this->delegateCountLoggerRegistered) {
+            $this->delegateCountLoggerRegistered = true;
+            $idleCheck->register(function () {
+                $counts = $this->getActiveDelegateCounts();
+                if (!empty($counts)) {
+                    self::logDebug('Doctrine open DB connections: ' . json_encode($counts));
+                }
+            });
+        }
 
         return $connection;
     }

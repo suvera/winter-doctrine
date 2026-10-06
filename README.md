@@ -72,6 +72,24 @@ datasource:
 
 ```
 
+### Datasource `url`
+
+`url` is a PDO-style DSN whose prefix selects the DBAL driver:
+
+| `url` prefix | DBAL driver |
+| ------------ | ----------- |
+| `mysql:` | `pdo_mysql` |
+| `oci:` | `pdo_oci` |
+| `sqlite:` | `sqlite3` (or `pdo_sqlite` when ext-sqlite3 is missing); `sqlite::memory:` for in-memory |
+| any DBAL driver name (`pdo_mysql:`, `mysqli:`, `pdo_pgsql:`, `pgsql:`, `pdo_sqlsrv:`, ...) | used as is |
+
+The `key=value;...` pairs after the prefix become DBAL connection parameters
+(`host`, `port`, `dbname`, `charset`, ...). Any `doctrine.*` key other than
+`entityPaths`/`isDevMode` (for example `doctrine.driver`,
+`doctrine.charset`, `doctrine.serverVersion`, `doctrine.driverOptions`)
+overrides the parameter of the same name; empty values are ignored.
+`username`/`password` override credentials embedded in the DSN.
+
 
 ORM/DBAL beans can be Autowired. No need to created them manually.
 
@@ -271,10 +289,15 @@ Four rules to stay out of trouble:
    you to raise the cap is always better than a cryptic "too many
    connections" from the database at 3 AM.
 
-   If the coroutine machinery itself fails, the failure is logged and the
-   request degrades instead of crashing — but pool exhaustion stays loud:
-   it still throws `PoolExhaustedException` rather than silently sharing
-   a connection.
+   Failures fail closed: if a request cannot get its own connection
+   (pool exhausted, connection cannot be created), the error is thrown
+   rather than handing the request a shared connection.
+
+   `REQUIRES_NEW` and `NOT_SUPPORTED` transactions run on their own,
+   dedicated connection, which counts toward `maxConnections` like any
+   other. A `REQUIRES_NEW` call inside a transaction therefore needs two
+   free connections; with `maxConnections: 1` it waits and then throws
+   `PoolExhaustedException`.
 
 ## How to use Transactions
 
@@ -295,6 +318,24 @@ public function executeInTransaction(): void {
     // do more things here
 }
 ```
+
+Always name the Doctrine transaction manager. A bare `#[Transactional]`
+resolves winter-boot's default `PlatformTransactionManager` (the PDBC
+datasource manager), which runs on a different connection: EntityManager
+writes would not be part of that transaction.
+
+Propagation behaves as in winter-boot:
+
+- `REQUIRED` (default): joins an existing transaction. If a joined call
+  fails, the outer transaction is marked rollback-only and rolls back
+  instead of committing, even when the outer method catches the exception.
+- `REQUIRES_NEW` / `NOT_SUPPORTED`: suspend the outer transaction and run on
+  a separate connection (and a separate EntityManager), so an inner commit
+  is independent of the outer outcome. Entities loaded in the outer
+  transaction are not managed by the inner EntityManager. This needs
+  coroutine-scoped Doctrine (on by default under Swoole); with it disabled
+  the inner work shares the outer connection and a warning is logged once.
+- `NESTED` (savepoints) is not supported.
 
 ### Programmatic Transactions
 
@@ -508,53 +549,54 @@ multitenant-datasource:
       migrations:
           enabled: true
       providerClass: "App\\Config\\MyTenantDataSourceProvider"
+      doctrine:
+          entityPaths:
+              - /path/to/tenant/entities
+          isDevMode: false
 ```
+
+`providerClass` must implement `TenantDataSourceProvider` and be a bean of
+that class (e.g. a `#[Component]`). Each tenant's `DataSourceConfig::getUrl()`
+uses the same DSN format as standard datasources (see *Datasource `url`*).
+`doctrine.entityPaths` / `doctrine.isDevMode` apply to every tenant of this
+manager; all tenants share one ORM configuration.
 
 When configured, Winter Doctrine automatically initializes and registers a `MultiTenantManager` bean named `<name>-manager` (e.g. `tenantdb-manager`) in the application context.
 
 ### Step 1: Implement TenantDataSourceProvider
 
-Create a `#[Configuration]` class that returns your implementation of [`TenantDataSourceProvider`](https://github.com/suvera/winter-boot/blob/main/src/pdbc/multitenant/TenantDataSourceProvider.php).
+Create a bean class that implements [`TenantDataSourceProvider`](https://github.com/suvera/winter-boot/blob/main/src/pdbc/multitenant/TenantDataSourceProvider.php) and point `providerClass` at it.
 
 ```php
-use dev\winterframework\pdbc\datasource\DataSourceConfig;
-use dev\winterframework\stereotype\Autowired;
-use dev\winterframework\stereotype\Bean;
-use dev\winterframework\stereotype\Configuration;
-use dev\winterframework\doctrine\orm\EntityManager;
-use dev\winterframework\pdbc\multitenant\TenantDataSourceProvider;
+namespace App\Config;
 
-#[Configuration]
-class MyTenantDataSourceProvider {
+use dev\winterframework\pdbc\datasource\DataSourceConfig;
+use dev\winterframework\pdbc\multitenant\TenantDataSourceProvider;
+use dev\winterframework\stereotype\Autowired;
+use dev\winterframework\stereotype\Component;
+use Doctrine\ORM\EntityManager;
+
+#[Component]
+class MyTenantDataSourceProvider implements TenantDataSourceProvider {
 
     #[Autowired("admindb-doctrine-em")]
     private EntityManager $adminEm;
 
-    #[Bean]
-    public function getTenantDataSourceProvider(): TenantDataSourceProvider {
-        return new class implements TenantDataSourceProvider {
-            public function getTenantDataSourceConfig(string $tenantId): DataSourceConfig {
-                // Query your admin database (or any config store) for this tenant
-                // $tenant = $this->adminEm->find(Tenant::class, $tenantId);
-                // $dbHost = $tenant->dbHost;
-                // $dbPort = $tenant->dbPort;
-                // $username = $tenant->username;
-                // $dbName = $tenant->database;
-                
-                $config = new DataSourceConfig();
-                $config->setName($tenantId);
-                $config->setUrl("mysql:host=localhost;port=3306;dbname=tenant_{$tenantId}_db");
-                $config->setUsername("tenant_user");
-                $config->setPassword("tenant_pass");
-                return $config;
-            }
+    public function getTenantDataSourceConfig(string $tenantId): DataSourceConfig {
+        // Query your admin database (or any config store) for this tenant
+        // $tenant = $this->adminEm->find(Tenant::class, $tenantId);
 
-            public function getTenantDataSourceConfigs(int $offset, int $limit): array {
-                // Return a list of tenant configurations (optional)
-                // Used for batch operations or tenant management
-                return [];
-            }
-        };
+        $config = new DataSourceConfig();
+        $config->setName($tenantId);
+        $config->setUrl("mysql:host=localhost;port=3306;dbname=tenant_{$tenantId}_db");
+        $config->setUsername("tenant_user");
+        $config->setPassword("tenant_pass");
+        return $config;
+    }
+
+    public function getAllTenantIds(): array {
+        // Return every known tenant id (used for batch operations)
+        return [];
     }
 }
 ```
