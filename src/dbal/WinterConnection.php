@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace dev\winterframework\doctrine\dbal;
 
 use dev\winterframework\coroutine\CoroutineScopedPool;
+use dev\winterframework\doctrine\common\IsolatingScopeProvider;
+use dev\winterframework\doctrine\common\IsolationCapable;
 use Doctrine\DBAL\Connection;
 use Override;
 use ReflectionClass;
@@ -37,19 +39,53 @@ use Traversable;
  * façade's uninitialised parent state and will fail — convert driver
  * exceptions against a delegate obtained from a real query instead).
  */
-class WinterConnection extends Connection {
+class WinterConnection extends Connection implements IsolationCapable {
 
     protected CoroutineScopedPool $pool;
+
+    /**
+     * The scope provider the pool was built on, when it supports
+     * REQUIRES_NEW / NOT_SUPPORTED isolation (null: no isolation).
+     */
+    protected ?IsolatingScopeProvider $isolation = null;
 
     /**
      * The parent constructor is deliberately never invoked: all state lives
      * in the per-scope delegates. Use this factory instead of `new`.
      */
-    public static function create(CoroutineScopedPool $pool): self {
+    public static function create(CoroutineScopedPool $pool, ?IsolatingScopeProvider $isolation = null): self {
         /** @var self $instance */
         $instance = (new ReflectionClass(self::class))->newInstanceWithoutConstructor();
         $instance->pool = $pool;
+        $instance->isolation = $isolation;
         return $instance;
+    }
+
+    #[Override]
+    public function supportsIsolation(): bool {
+        return $this->isolation !== null;
+    }
+
+    /**
+     * Switch the current scope to a dedicated delegate (own connection).
+     * The pool must be built on the same IsolatingScopeProvider.
+     */
+    #[Override]
+    public function beginIsolation(): void {
+        $this->isolation?->begin();
+    }
+
+    #[Override]
+    public function endIsolation(): void {
+        if ($this->isolation === null || $this->isolation->getDepth() === 0) {
+            return;
+        }
+        try {
+            // Still isolated here, so this destroys the dedicated delegate.
+            $this->pool->invalidateCurrent();
+        } finally {
+            $this->isolation->end();
+        }
     }
 
     #[Override]

@@ -8,13 +8,14 @@ declare(strict_types=1);
 require_once __DIR__ . '/bootstrap.php';
 
 foreach (glob(__DIR__ . '/*Test.php') as $test) {
-    // PoolCapTest exercises the winter-boot-owned pool through the facade.
-    // It runs wherever winter-boot is loadable (host app, sibling checkout)
-    // and skips cleanly standalone: the pool's own suite lives in boot.
-    if (basename($test) === 'PoolCapTest.php'
-        && !class_exists('dev\winterframework\coroutine\CoroutineScopedPool')
+    // These tests exercise winter-boot classes (pool, transaction manager
+    // base, DataSourceConfig). They run wherever winter-boot is loadable
+    // (host app, WINTER_BOOT_DIR, sibling checkout) and skip cleanly
+    // standalone.
+    if (in_array(basename($test), ['PoolCapTest.php', 'TransactionTest.php', 'MultiTenantTest.php'], true)
+        && !class_exists('dev\winterframework\txn\support\AbstractPlatformTransactionManager')
     ) {
-        echo "== PoolCapTest.php ==\nSKIP (winter-boot pool not loadable)\n";
+        echo '== ' . basename($test) . " ==\nSKIP (winter-boot not loadable)\n";
         continue;
     }
     echo '== ' . basename($test) . " ==\n";

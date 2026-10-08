@@ -8,9 +8,13 @@ use dev\winterframework\core\context\ApplicationContext;
 use dev\winterframework\coroutine\CoroutineScopeProvider;
 use dev\winterframework\coroutine\CoroutineScopeProviders;
 use dev\winterframework\coroutine\CoroutineScopedPool;
+use dev\winterframework\doctrine\common\DoctrineDsn;
+use dev\winterframework\doctrine\common\IsolatingScopeProvider;
 use dev\winterframework\doctrine\common\OrmConfigurationFactory;
 use dev\winterframework\coroutine\SwooleCoroutineScopeProvider;
+use dev\winterframework\doctrine\dbal\DbalTransactionManager;
 use dev\winterframework\doctrine\dbal\WinterConnection;
+use dev\winterframework\doctrine\orm\EmTransactionManager;
 use dev\winterframework\doctrine\orm\WinterEntityManager;
 use dev\winterframework\exception\BeansDependencyException;
 use dev\winterframework\pdbc\datasource\DataSourceConfig;
@@ -35,8 +39,11 @@ use Throwable;
  * ```yaml
  * multitenant-datasource:
  *     - name: "tenantdb"
- *       url: "mysql:host=localhost;port=3306"
  *       providerClass: "App\\Config\\MyTenantDataSourceProvider"
+ *       doctrine:
+ *           entityPaths:
+ *               - /path/to/tenant/entities
+ *           isDevMode: false
  * ```
  *
  * ## Usage
@@ -92,9 +99,20 @@ class MultiTenantManager {
     private array $connPools = [];
 
     /**
-     * @var array<string, Configuration>
+     * One ORM configuration for every tenant of this manager: tenants share
+     * the entity mapping, so metadata is parsed and cached once.
      */
-    private array $ormConfigs = [];
+    private ?Configuration $ormConfig = null;
+
+    /**
+     * @var array<string, IsolatingScopeProvider>
+     */
+    private array $emIsolation = [];
+
+    /**
+     * @var array<string, IsolatingScopeProvider>
+     */
+    private array $connIsolation = [];
 
     /**
      * @var array<string, EventManager>
@@ -122,7 +140,9 @@ class MultiTenantManager {
         ?CoroutineScopeProvider $scopes = null,
         ?bool $coroutineScoped = null,
         int $maxDelegates = 50,
-        int $maxWaitMs = 5000
+        int $maxWaitMs = 5000,
+        private array $entityPaths = [],
+        private bool $devMode = false
     ) {
         $this->scopes = $scopes ?? CoroutineScopeProviders::shared();
         $this->coroutineScoped = $coroutineScoped ?? SwooleCoroutineScopeProvider::isAvailable();
@@ -212,7 +232,7 @@ class MultiTenantManager {
         }
         if (!isset($this->connections[$tenantId])) {
             $config = $this->getTenantConfig($tenantId);
-            $this->connections[$tenantId] = $this->buildConnection($config, $tenantId);
+            $this->connections[$tenantId] = $this->buildConnection($config);
         }
         return $this->connections[$tenantId];
     }
@@ -274,9 +294,10 @@ class MultiTenantManager {
         }
         if (!isset($this->emPools[$tenantId])) {
             [$maxDelegates, $maxWaitMs] = $this->resolvePoolCaps($this->getTenantConfig($tenantId));
+            $this->emIsolation[$tenantId] = new IsolatingScopeProvider($this->scopes);
             $this->emPools[$tenantId] = new CoroutineScopedPool(
                 fn() => $this->buildDelegateEntityManager($tenantId),
-                $this->scopes,
+                $this->emIsolation[$tenantId],
                 function (EntityManager $em): void {
                     $this->destroyDelegateEntityManager($em);
                 },
@@ -287,7 +308,7 @@ class MultiTenantManager {
                 $maxWaitMs
             );
         }
-        $facade = WinterEntityManager::create($this->emPools[$tenantId]);
+        $facade = WinterEntityManager::create($this->emPools[$tenantId], $this->emIsolation[$tenantId]);
         $this->entityManagers[$tenantId] = $facade;
         return $facade;
     }
@@ -299,9 +320,10 @@ class MultiTenantManager {
         }
         if (!isset($this->connPools[$tenantId])) {
             [$maxDelegates, $maxWaitMs] = $this->resolvePoolCaps($this->getTenantConfig($tenantId));
+            $this->connIsolation[$tenantId] = new IsolatingScopeProvider($this->scopes);
             $this->connPools[$tenantId] = new CoroutineScopedPool(
                 fn() => $this->buildDelegateConnection($tenantId),
-                $this->scopes,
+                $this->connIsolation[$tenantId],
                 function (Connection $conn): void {
                     $this->destroyDelegateConnection($conn);
                 },
@@ -312,16 +334,16 @@ class MultiTenantManager {
                 $maxWaitMs
             );
         }
-        $facade = WinterConnection::create($this->connPools[$tenantId]);
+        $facade = WinterConnection::create($this->connPools[$tenantId], $this->connIsolation[$tenantId]);
         $this->connections[$tenantId] = $facade;
         return $facade;
     }
 
-    private function getTenantOrmConfiguration(string $tenantId): Configuration {
-        if (!isset($this->ormConfigs[$tenantId])) {
-            $this->ormConfigs[$tenantId] = OrmConfigurationFactory::create([], false);
+    private function getTenantOrmConfiguration(): Configuration {
+        if ($this->ormConfig === null) {
+            $this->ormConfig = OrmConfigurationFactory::create($this->entityPaths, $this->devMode);
         }
-        return $this->ormConfigs[$tenantId];
+        return $this->ormConfig;
     }
 
     private function getTenantEventManager(string $tenantId): EventManager {
@@ -331,29 +353,30 @@ class MultiTenantManager {
         return $this->sharedEventManagers[$tenantId];
     }
 
+    /**
+     * DBAL parameters for a tenant. DBAL 4 has no "url" parameter, so the
+     * tenant's PDO-style DSN is parsed the same way as standard datasources.
+     */
     private function tenantDbParams(DataSourceConfig $config): array {
-        $dbParams = ['url' => $config->getUrl()];
-        if ($config->getUsername()) {
-            $dbParams['user'] = $config->getUsername();
-        }
-        if ($config->getPassword()) {
-            $dbParams['password'] = $config->getPassword();
-        }
-        return $dbParams;
+        return DoctrineDsn::connectionParams(
+            $config->getUrl(),
+            $config->getUsername(),
+            $config->getPassword()
+        );
     }
 
     private function buildDelegateConnection(string $tenantId): Connection {
         $config = $this->getTenantConfig($tenantId);
         return DriverManager::getConnection(
             $this->tenantDbParams($config),
-            $this->getTenantOrmConfiguration($tenantId)
+            $this->getTenantOrmConfiguration()
         );
     }
 
     private function buildDelegateEntityManager(string $tenantId): EntityManager {
         return new EntityManager(
             $this->buildDelegateConnection($tenantId),
-            $this->getTenantOrmConfiguration($tenantId),
+            $this->getTenantOrmConfiguration(),
             $this->getTenantEventManager($tenantId)
         );
     }
@@ -396,44 +419,19 @@ class MultiTenantManager {
         }
     }
 
-    private function buildConnection(DataSourceConfig $config, string $tenantId): Connection {
-        $url = $config->getUrl();
-        $user = $config->getUsername();
-        $password = $config->getPassword();
-        
-        $dbParams = [
-            'url' => $url,
-        ];
-        
-        if ($user) {
-            $dbParams['user'] = $user;
-        }
-        if ($password) {
-            $dbParams['password'] = $password;
-        }
-        
-        return DriverManager::getConnection($dbParams);
+    private function buildConnection(DataSourceConfig $config): Connection {
+        return DriverManager::getConnection(
+            $this->tenantDbParams($config),
+            $this->getTenantOrmConfiguration()
+        );
     }
 
     private function buildEntityManager(DataSourceConfig $config, string $tenantId): EntityManager {
-        $url = $config->getUrl();
-        $user = $config->getUsername();
-        $password = $config->getPassword();
-        
-        $dbParams = [
-            'url' => $url,
-        ];
-        
-        if ($user) {
-            $dbParams['user'] = $user;
-        }
-        if ($password) {
-            $dbParams['password'] = $password;
-        }
-        
-        $configObj = OrmConfigurationFactory::create([], false);
-        
-        return new EntityManager($this->buildConnection($config, $tenantId), $configObj);
+        return new EntityManager(
+            $this->buildConnection($config),
+            $this->getTenantOrmConfiguration(),
+            $this->getTenantEventManager($tenantId)
+        );
     }
 
     /**
@@ -462,7 +460,9 @@ class MultiTenantManager {
         $this->connections = [];
         $this->emPools = [];
         $this->connPools = [];
-        $this->ormConfigs = [];
+        $this->emIsolation = [];
+        $this->connIsolation = [];
+        $this->ormConfig = null;
         $this->sharedEventManagers = [];
         $this->emTransactionManagers = [];
         $this->dbalTransactionManagers = [];
@@ -501,7 +501,8 @@ class MultiTenantManager {
             $this->emTransactionManagers[$tenantId],
             $this->dbalTransactionManagers[$tenantId],
             $this->tenantConfigs[$tenantId],
-            $this->ormConfigs[$tenantId],
+            $this->emIsolation[$tenantId],
+            $this->connIsolation[$tenantId],
             $this->sharedEventManagers[$tenantId]
         );
     }
@@ -512,6 +513,9 @@ class MultiTenantManager {
      * @return string[]
      */
     public function getCachedTenantIds(): array {
-        return array_keys($this->connections);
+        return array_values(array_unique(array_merge(
+            array_map('strval', array_keys($this->entityManagers)),
+            array_map('strval', array_keys($this->connections))
+        )));
     }
 }

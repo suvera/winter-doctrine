@@ -5,10 +5,11 @@ declare(strict_types=1);
 namespace dev\winterframework\doctrine\orm;
 
 use dev\winterframework\coroutine\CoroutineScopedPool;
+use dev\winterframework\doctrine\common\IsolatingScopeProvider;
+use dev\winterframework\doctrine\common\IsolationCapable;
 use Doctrine\ORM\EntityManager;
 use Override;
 use ReflectionClass;
-use Throwable;
 use DateTimeInterface;
 use Doctrine\Common\EventManagerInterface;
 use Doctrine\DBAL\Connection;
@@ -49,19 +50,53 @@ use Doctrine\ORM\UnitOfWork;
  *   query builders, proxies bind to one scope's delegate); inject and use
  *   the façade itself.
  */
-class WinterEntityManager extends EntityManager {
+class WinterEntityManager extends EntityManager implements IsolationCapable {
 
     protected CoroutineScopedPool $pool;
+
+    /**
+     * The scope provider the pool was built on, when it supports
+     * REQUIRES_NEW / NOT_SUPPORTED isolation (null: no isolation).
+     */
+    protected ?IsolatingScopeProvider $isolation = null;
 
     /**
      * The parent constructor is deliberately never invoked: all state lives
      * in the per-scope delegates. Use this factory instead of `new`.
      */
-    public static function create(CoroutineScopedPool $pool): self {
+    public static function create(CoroutineScopedPool $pool, ?IsolatingScopeProvider $isolation = null): self {
         /** @var self $instance */
         $instance = (new ReflectionClass(self::class))->newInstanceWithoutConstructor();
         $instance->pool = $pool;
+        $instance->isolation = $isolation;
         return $instance;
+    }
+
+    #[Override]
+    public function supportsIsolation(): bool {
+        return $this->isolation !== null;
+    }
+
+    /**
+     * Switch the current scope to a dedicated delegate (own connection).
+     * The pool must be built on the same IsolatingScopeProvider.
+     */
+    #[Override]
+    public function beginIsolation(): void {
+        $this->isolation?->begin();
+    }
+
+    #[Override]
+    public function endIsolation(): void {
+        if ($this->isolation === null || $this->isolation->getDepth() === 0) {
+            return;
+        }
+        try {
+            // Still isolated here, so this destroys the dedicated delegate.
+            $this->pool->invalidateCurrent();
+        } finally {
+            $this->isolation->end();
+        }
     }
 
     #[Override]
@@ -74,12 +109,7 @@ class WinterEntityManager extends EntityManager {
      * the parity check forces a real override.
      */
     public function __call(string $name, array $arguments): mixed {
-        try {
-            $delegate = $this->pool->current();
-            return $delegate->$name(...$arguments);
-        } catch (Throwable $e) {
-            throw $e;
-        }
+        return $this->pool->current()->$name(...$arguments);
     }
 
     #[Override]

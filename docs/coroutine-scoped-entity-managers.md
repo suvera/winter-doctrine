@@ -1,6 +1,18 @@
 # Holistic redesign: Doctrine usage in WinterBoot under Swoole
 
-Status: design proposal (not implemented).
+Status: implemented. This is the original design record; where it differs
+from the shipped code, the README is authoritative. Notable changes since
+the proposal:
+
+- The flag is `winter.coroutine.db.enabled` (plus `maxConnections` /
+  `maxWaitMs`), not `doctrine.coroutineScopedEntityManagers`.
+- Failures fail closed: a request that cannot get its own connection gets
+  an exception, never the shared delegate (section 2's "degrade to logs"
+  no longer applies to connection acquisition).
+- Scoped delegates are reaped by `defer` only; `IdleCheckRegistry` keeps
+  the non-scoped connection alive and logs delegate counts.
+- REQUIRES_NEW / NOT_SUPPORTED run on a dedicated delegate obtained through
+  an isolated sub-scope of the same pool, so it counts toward the cap.
 
 ## 1. Problem
 
