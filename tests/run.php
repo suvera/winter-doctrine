@@ -18,6 +18,13 @@ foreach (glob(__DIR__ . '/*Test.php') as $test) {
         echo '== ' . basename($test) . " ==\nSKIP (winter-boot not loadable)\n";
         continue;
     }
+    // Lock managers build on winter-boot 2.1.6+.
+    if (basename($test) === 'LockTest.php'
+        && !class_exists('dev\winterframework\util\concurrent\StoreLockManager')
+    ) {
+        echo '== ' . basename($test) . " ==\nSKIP (needs winter-boot 2.1.6+)\n";
+        continue;
+    }
     echo '== ' . basename($test) . " ==\n";
     require_once $test;
 }

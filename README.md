@@ -534,6 +534,44 @@ class UserDbalService {
 
 ---
 
+## Distributed Locking (`DbalLockManager`)
+
+`DbalLockManager` makes `#[Lockable]` exclusive across every pod that uses the same database, through a Doctrine DBAL connection. It needs Winter Boot 2.1.6 or later.
+
+```php
+use dev\winterframework\doctrine\lock\DbalLockManager;
+use dev\winterframework\stereotype\Autowired;
+use dev\winterframework\stereotype\Bean;
+use dev\winterframework\stereotype\Configuration;
+use dev\winterframework\util\concurrent\LockManager;
+use Doctrine\DBAL\Connection;
+
+#[Configuration]
+class LockConfig {
+    #[Autowired("admindb-doctrine-dbal")]
+    private Connection $adminDbal;
+
+    #[Bean('dbLockManager')]
+    public function dbLockManager(): LockManager {
+        return new DbalLockManager($this->adminDbal);
+    }
+}
+```
+
+```php
+#[Lockable(name: 'order-#{id}', ttlSeconds: 30, waitMilliSecs: 2000, lockManager: 'dbLockManager')]
+public function settle(int $id): void { /* runs on one pod at a time per order */ }
+```
+
+How it works:
+
+- Locks are rows in the table `winter_locks` (`lock_name` primary key, `owner`, `expires_at` in epoch milliseconds, `0` = no expiry). The primary key makes taking a lock atomic, and only the holder's random token can release or extend it. The layout is the same as Winter Boot's `PdoLockManager`, so both can share the table.
+- The table is created on first use with your database's own types, so every platform DBAL supports works. To create it yourself, pass `createTable: false` and run the SQL from `(new DbalLockStore($conn))->getCreateTableSql()`.
+- With a `{name}-doctrine-dbal` bean, each lock statement runs on its own isolated connection and commits at once, so the lock is visible to other pods immediately, even when the caller is inside a transaction. A plain DBAL `Connection` that is inside a transaction is refused, because the lock would stay invisible until that transaction commits.
+- `ttlSeconds` lets a lock held by a crashed pod expire. Always set it. Expiry uses the application clock, so keep pod clocks in sync (NTP).
+- `waitMilliSecs` retries every 50 ms (constructor `pollMs`) until the lock is free or the time is up; inside a coroutine only that coroutine waits.
+- Constructor arguments: `new DbalLockManager(Connection $connection, string $table = 'winter_locks', bool $createTable = true, int $pollMs = 50)`.
+
 ## Multi-Tenant Support
 
 Winter Doctrine provides native support for multi-tenancy via `MultiTenantManager` and `TenantDataSourceProvider` (from winter-boot), allowing per-tenant `EntityManager`, `Connection`, and transaction manager instances.
