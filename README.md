@@ -208,6 +208,14 @@ winter:
             enabled: true   # kill switch: set to false to restore old behavior
 ```
 
+With `false`, every datasource has one `EntityManager` per worker, shared by
+every request the worker serves. That is only safe when a worker runs one
+request at a time (no Swoole coroutine hooks, `enable_coroutine` off). With
+coroutines on, concurrent requests share one transaction and one notebook, and
+`find()` can hand one tenant an entity another tenant's request loaded, straight
+from memory, without any tenant filter running. The library logs a warning at
+boot when the flag is `false` while Swoole is loaded.
+
 Four rules to stay out of trouble:
 
 1. **Always use the injected `EntityManager` itself.** Do NOT save things it
@@ -793,3 +801,44 @@ $tenantIds = $this->mt->getCachedTenantIds();
 // Get the tenant data source provider for advanced use
 $provider = $this->mt->getTenantDataSourceProvider();
 ```
+
+## Row-Level Tenant Filters (`ParameterizedFilter`)
+
+When tenants share tables (a `tenant_id` column) rather than databases, register a Doctrine `SQLFilter` per datasource and every query, `find()`, repository call, lazy load and collection is limited to the current tenant.
+
+```yaml
+datasource:
+  - name: main
+    url: "mysql://..."
+    doctrine:
+      entityPaths: [ "src/Entity" ]
+      filters:
+        tenant: App\Orm\TenantFilter      # or: [ { name: tenant, class: App\Orm\TenantFilter } ]
+```
+
+Listed filters are registered and enabled on every EntityManager. A filter that implements [`ParameterizedFilter`](src/orm/ParameterizedFilter.php) supplies its own parameters from request state:
+
+```php
+final class TenantFilter extends SQLFilter implements ParameterizedFilter {
+    public static function currentParameters(): array {
+        return ['tenant' => TenantContext::currentId()];   // null when there is no tenant
+    }
+
+    public function addFilterConstraint(ClassMetadata $meta, string $alias): string {
+        if (!$meta->hasField('tenantId')) {
+            return '';
+        }
+        if ($this->getParameter('tenant') === "''") {
+            return '1 = 0';   // no tenant: match nothing (fail closed)
+        }
+        return $alias . '.' . $meta->getColumnName('tenantId') . ' = ' . $this->getParameter('tenant');
+    }
+}
+```
+
+- `currentParameters()` is read whenever Doctrine builds SQL or a cache key, in both modes: with `winter.coroutine.db.enabled: false` (one EntityManager per worker) and with coroutine-scoped EntityManagers. Nobody has to set the parameter per request, and queue consumers, timers and async tasks never inherit the previous request's tenant.
+- Only changed values are written, so the query cache stays warm for an unchanged tenant and a new tenant gets a new cache key.
+- Read the tenant with `getParameter()` inside `addFilterConstraint()`, never from request state directly: Doctrine caches the generated SQL by parameter value.
+- `null` arrives as `''`. Decide explicitly whether that matches nothing (recommended) or everything (only for trusted CLI/admin code).
+- Keep `currentParameters()` cheap; it runs on every query. If a worker serves requests concurrently in coroutines, read coroutine-local state there, not a static property.
+- To run a query across tenants on purpose, use `$em->getFilters()->suspend('tenant')` and `restore('tenant')`.

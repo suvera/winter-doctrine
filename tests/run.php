@@ -12,7 +12,7 @@ foreach (glob(__DIR__ . '/*Test.php') as $test) {
     // base, DataSourceConfig). They run wherever winter-boot is loadable
     // (host app, WINTER_BOOT_DIR, sibling checkout) and skip cleanly
     // standalone.
-    if (in_array(basename($test), ['PoolCapTest.php', 'TransactionTest.php', 'MultiTenantTest.php'], true)
+    if (in_array(basename($test), ['PoolCapTest.php', 'TransactionTest.php', 'MultiTenantTest.php', 'TenantFilterTest.php'], true)
         && !class_exists('dev\winterframework\txn\support\AbstractPlatformTransactionManager')
     ) {
         echo '== ' . basename($test) . " ==\nSKIP (winter-boot not loadable)\n";

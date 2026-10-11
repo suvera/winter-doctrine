@@ -21,6 +21,7 @@ use dev\winterframework\coroutine\CoroutineScopeProviders;
 use dev\winterframework\coroutine\CoroutineScopedPool;
 use dev\winterframework\coroutine\SwooleCoroutineScopeProvider;
 use dev\winterframework\doctrine\orm\EmTransactionManager;
+use dev\winterframework\doctrine\orm\FilterAwareEntityManager;
 use dev\winterframework\doctrine\orm\WinterEntityManager;
 use Doctrine\Common\EventManager;
 use Doctrine\DBAL\Connection;
@@ -142,6 +143,27 @@ class DoctrineComponentBuilder {
         [$this->maxDelegates, $this->maxWaitMs] = $this->resolveCoroutineCaps();
         $this->init($dataSources);
         $this->coroutineScoped = $this->resolveCoroutineScoping();
+        $warning = self::sharedEntityManagerWarning($this->coroutineScoped, SwooleCoroutineScopeProvider::isAvailable());
+        if ($warning !== null) {
+            self::logWarning($warning);
+        }
+    }
+
+    /**
+     * The boot warning for coroutine scoping switched off while Swoole is
+     * loaded (null when there is nothing to warn about). Scoping defaults
+     * to on under Swoole, so this only fires when it was turned off.
+     */
+    public static function sharedEntityManagerWarning(bool $coroutineScoped, bool $swooleAvailable): ?string {
+        if ($coroutineScoped || !$swooleAvailable) {
+            return null;
+        }
+        return self::COROUTINE_SCOPED_FLAG . ' is false while Swoole is loaded: each datasource has ONE'
+            . ' EntityManager and Connection per worker, shared by every coroutine. This is only safe if a'
+            . ' worker runs one request at a time (no coroutine hooks, enable_coroutine off). Otherwise'
+            . ' concurrent requests share a transaction and a unit of work, and find() can return an entity'
+            . ' another request (another tenant) loaded, straight from the identity map, without any SQL'
+            . ' filter running. Remove the setting to get one EntityManager per coroutine.';
     }
 
     public function getMaxDelegates(): int {
@@ -488,7 +510,8 @@ class DoctrineComponentBuilder {
         if (!isset($this->ormConfigs[$name])) {
             $this->ormConfigs[$name] = OrmConfigurationFactory::create(
                 $ds->getEntityPaths(),
-                $ds->isDevMode()
+                $ds->isDevMode(),
+                $ds->getFilters()
             );
         }
         return $this->ormConfigs[$name];
@@ -500,11 +523,13 @@ class DoctrineComponentBuilder {
      * non-negotiable — sharing merges DB transactions across coroutines).
      */
     private function buildDelegateEntityManager(DoctrineDbConfig $ds): EntityManager {
-        return new EntityManager(
+        $em = new FilterAwareEntityManager(
             $this->buildFreshConnection($ds),
             $this->getOrmConfiguration($ds),
             $this->getSharedEventManager($ds)
         );
+        $em->enableFilters(array_keys($ds->getFilters()));
+        return $em;
     }
 
     private function destroyDelegateEntityManager(EntityManager $em): void {
@@ -583,10 +608,14 @@ class DoctrineComponentBuilder {
 
         $config = OrmConfigurationFactory::create(
             $ds->getEntityPaths(),
-            $ds->isDevMode()
+            $ds->isDevMode(),
+            $ds->getFilters()
         );
 
-        $obj = new EntityManager($this->buildConnection($ds), $config);
+        // Lives for the whole worker: FilterAwareEntityManager reads
+        // ParameterizedFilter parameters per query, not once here.
+        $obj = new FilterAwareEntityManager($this->buildConnection($ds), $config);
+        $obj->enableFilters(array_keys($ds->getFilters()));
 
         $this->dsObjectMap[$ds] = $obj;
 

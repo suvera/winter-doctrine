@@ -20,7 +20,10 @@ final class OrmConfigurationFactory {
     private function __construct() {
     }
 
-    public static function create(array $entityPaths, bool $isDevMode): Configuration {
+    /**
+     * @param array<string, class-string> $filters SQLFilter name => class
+     */
+    public static function create(array $entityPaths, bool $isDevMode, array $filters = []): Configuration {
         $config = ORMSetup::createAttributeMetadataConfig(
             $entityPaths,
             $isDevMode,
@@ -30,6 +33,10 @@ final class OrmConfigurationFactory {
 
         if (method_exists($config, 'enableNativeLazyObjects')) {
             $config->enableNativeLazyObjects(true);
+        }
+
+        foreach ($filters as $name => $class) {
+            $config->addFilter((string)$name, $class);
         }
 
         return $config;
